@@ -1,0 +1,24 @@
+# 評価用ステム・音声（著作権の都合でコミットしない）
+data/
+*.wav
+*.aiff
+*.flac
+*.mp3
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build
+build/
+cmake-build-*/
+out/
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
