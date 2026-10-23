@@ -18,6 +18,7 @@ pip install -r analysis/requirements.txt
 | `score_transcription.py` | 採譜の F 値（M0-1） | `python analysis/score_transcription.py 正解.csv 推定.csv` |
 | `stft_distance.py` | 多重解像度 STFT 距離（M0-3、切り出しの信頼度） | `python analysis/stft_distance.py 元のステム.wav 再現.wav` |
 | `baseline_transcribe.py` | 学習モデル無しの採譜（基準値） | `python analysis/baseline_transcribe.py ステム.wav 推定.csv` |
+| `extract_kit.py` | 重ならない打の切り出し → 強さ別の層 → キット（M0-2 の材料） | `python analysis/extract_kit.py ステム.wav 打点.csv 出力先 --render 再現.wav` |
 
 - 正解・推定の打点は CSV（`time_sec,class[,velocity]`）か MIDI（GM ドラムマップ、チャンネル10）。種類の名前は `drumeval/labels.py` の `FINE_TO_COARSE` を見る。採点では粗い5種（kick / snare / hihat / tom / cymbal）にまとめる。
 - 時刻の許容誤差は ±50 ms。M0-1 は kick / snare / hihat の F 値の単純平均。
@@ -25,8 +26,16 @@ pip install -r analysis/requirements.txt
 
 ## 基準値の採譜と合成音（`drumeval/baseline.py`、`drumeval/synth.py`）
 
-- `baseline.py`: スペクトル・フラックスで打点を拾い、打点直後の低域／中域のエネルギー比でキックとスネアを分け、高域のフラックスでハイハットを拾う。公開モデルや自前の CRNN（3〜4週目）が「これより良い」ことを確かめる下限。きれいな合成音では F=1.0、にじみ（`bleed=0.3`）を足すとキック・スネアは 0.6 程度に落ちる。
+- `baseline.py`: スペクトル・フラックスで打点を拾い、打点直後の低域／中域のエネルギー比でキックとスネアを分け、高域のフラックスでハイハットを拾う。公開モデルや自前の CRNN（3〜4週目）が「これより良い」ことを確かめる下限。きれいな合成音では F=1.0、にじみ（`bleed=0.3`）を足すとキック・スネアは 0.6 程度に落ちる。スネアの打では高域も立ち上がるので、スネアと同時に「ハイハット」も出してしまう（切り出しではその打が「重なり」扱いになる）。この弱点は学習モデルで直す。
 - `synth.py`: 打点ラベルから合成のドラム音を描画する。採点の通しテストと、「自社の合成データで学習する」道の最小版。`bleed`（低域の雑音）と `reverb_tail`（残響）で難しさを足せる。
+
+## 切り出しとキット（`drumeval/extract.py`）
+
+- 前 0.1 秒・後 0.15 秒に他の打が無い打だけを切り出し、次の打の直前（上限 1.5 秒）まで取る。
+- 種類ごとにピークの大きさで層（既定 3）に分け、層の中の複数の打をラウンドロビン（既定 3）にする。打が少ない種類は層を減らす。
+- 打点に強さが無ければ、打点直後 20 ms のピークを種類ごとの分布で 1〜127 に割り当てる（計画書 3.2）。
+- `--render` で同じ打点をキットで鳴らし直し、元のステムとの STFT 距離を出す。聞き比べ（M0-2）はこの2つの WAV で行う。
+- 尾の延長（次の打で切れた分）は Phase 2 の課題で、ここではやらない。
 
 ## テスト
 
