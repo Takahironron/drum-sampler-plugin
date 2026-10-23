@@ -1,0 +1,7 @@
+# Phase 0 の採点スクリプトに必要な最小の依存。採譜モデルの試作（PyTorch、librosa）は別途足す。
+numpy>=1.26
+scipy>=1.11
+mir_eval>=0.7
+soundfile>=0.12
+mido>=1.3
+pytest>=7
