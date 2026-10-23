@@ -61,10 +61,11 @@
 |---|---|---|
 | 作業順の文書（この文書） | 済 | 2026-10-23 |
 | 採点スクリプト（F 値、STFT 距離） | 済 | `analysis/`、合成データのテスト付き |
+| 基準値の採譜（学習モデル無し）と合成音の描画 | 済 | `analysis/drumeval/baseline.py`、`synth.py`。通しテスト付き |
 | 評価用ステム一覧のひな形 | 済 | `docs/phase0/評価用ステム一覧.md` |
-| ライセンス一覧 | 着手 | `docs/phase0/ライセンス一覧.md` |
-| JUCE の空のプラグイン | 着手 | `plugin/`。Windows でのビルドと pluginval は未確認 |
-| GitHub Actions | 着手 | `.github/workflows/` |
+| ライセンス一覧 | 済（要確認 7件残り） | `docs/phase0/ライセンス一覧.md`。VST3 SDK は MIT、JUCE 8 Starter はスプラッシュ不要。CLAUDE.md と計画書に反映済 |
+| JUCE の空のプラグイン | 着手 | `plugin/`。Linux でビルド確認済。Windows でのビルドと pluginval は未確認（CI と手元で確認） |
+| GitHub Actions | 着手 | `.github/workflows/build.yml`（Windows + pluginval、Linux、macOS）、`analysis.yml`（pytest）。初回の実行結果は未確認 |
 | 評価用ステムの収集 | 未 | Takahiro の手元で行う |
 | 採譜の試作 | 未 | |
 | 切り出しと層 | 未 | |

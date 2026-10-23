@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-このリポジトリは、Takahiro が個人で開発するドラム音源プラグインのものです。まだコードは無く、計画と調査資料だけが入っています。最初の作業は Phase 0（技術検証）です。
+このリポジトリは、Takahiro が個人で開発するドラム音源プラグインのものです。現在は Phase 0（技術検証）で、作業順と進み具合は `docs/plan/Phase0作業順.md` にあります。作業を終えたらその「進み具合」の表を更新する。
 
 ## やり取りのルール
 
@@ -19,7 +19,7 @@
 
 - JUCE（C++、CMake）の VST3。Windows を先に出し、macOS／AU（と CLAP）は Phase 5。
 - 個人開発（週20〜30時間を仮定）、実時間で動くこと。
-- JUCE は AGPLv3 と商用ライセンスの二本立て。販売前に商用ライセンスと VST3 SDK の条件を確かめる。
+- JUCE は AGPLv3 と商用ライセンス（EULA）の二本立て。JUCE 8 の無料階層（Starter、年 $20,000 まで）はスプラッシュ画面が不要。売上が超えたら Indie。VST3 SDK は 3.8 以降 MIT（JUCE 8.0.15 の同梱版は 3.8.0）。詳細と出典は `docs/phase0/ライセンス一覧.md`。
 
 ## 計画の要点（詳細は `docs/plan/ドラム音源プラグイン開発計画.md`）
 
@@ -93,7 +93,7 @@
 
 - **著作権（R3）**: 市販曲から切り出した音や、市販曲のステムをリポジトリにコミットしない。評価用ステムはリポジトリの外（例: `data/`、`.gitignore` 済み）に置く。
 - **OSS**: STK（MIT 形式）、Mutable Instruments のファームウェア（MIT）、ONNX Runtime（MIT）、Demucs（MIT）は組み込める。RipplerX・Kit・nlm などの GPL 系はコードをコピーせず、読んで仕組みを学んで自分で書き直す。
-- **学習データ・モデル**: 商用利用の可否を確かめるまで製品に入れない。最も安全なのは自社のサンプルとモーダル音源で作る合成データ。
+- **学習データ・モデル**: 製品に入れる採譜・パート分けモデルは、CC BY 4.0 のデータ（E-GMD、Groove MIDI Dataset、StemGMD）と自社の合成データから自分で学習する。ADTOF、LarsNet の学習済みモデル、Demucs の重み、madmom の同梱モデルは非商用なので評価・比較にだけ使う（`docs/phase0/ライセンス一覧.md`）。
 - **特許（R9）**: 録音から材質を推定する米国特許（UNC、US 9,401,684 B2）がある。Phase 2 で推定を入れる前に請求項と権利の状態を確認する。
 - **実時間処理**: オーディオスレッドでメモリの確保、ロック、ファイル入出力、推論をしない。
 - 範囲が膨らんだら、追加の要望は機能 C に入れて次の版で判断する（R6）。
@@ -103,6 +103,11 @@
 | 資料 | 場所 |
 |---|---|
 | 開発計画（初版、2026-10-22） | `docs/plan/ドラム音源プラグイン開発計画.md` |
+| Phase 0 の作業順と進み具合 | `docs/plan/Phase0作業順.md` |
+| ライセンス一覧（Phase 0） | `docs/phase0/ライセンス一覧.md` |
+| 評価用ステム一覧（Phase 0） | `docs/phase0/評価用ステム一覧.md` |
+| 採点スクリプト（F 値、STFT 距離） | `analysis/`（`analysis/README.md`） |
+| JUCE の空のプラグイン | `plugin/`（`plugin/README.md`） |
 | 市販ドラム音源の機能比較（25製品×32機能、出典48件、ジャンル別キット） | `docs/research/ドラム音源_機能比較.xlsx` |
 | 物理モデリング系プラグイン46件＋D3 先行事例の比較 | `docs/research/ドラム音源プラグイン比較.xlsx`（生成スクリプトは無い。元データは D1_products.md の表A〜C） |
 | 機能比較 Excel の生成スクリプト（データはスクリプト内） | `scripts/build_feature_matrix.py`（`pip install openpyxl` の後 `python scripts/build_feature_matrix.py`） |
