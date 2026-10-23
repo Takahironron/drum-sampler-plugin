@@ -68,6 +68,8 @@
 | ライセンス一覧 | 済（要確認 7件残り） | `docs/phase0/ライセンス一覧.md`。VST3 SDK は MIT、JUCE 8 Starter はスプラッシュ不要。CLAUDE.md と計画書に反映済 |
 | JUCE の空のプラグイン | 着手 | `plugin/`。Linux でビルド確認済。Windows でのビルドと pluginval は未確認（CI と手元で確認） |
 | GitHub Actions | 着手 | `.github/workflows/build.yml`（Windows + pluginval、Linux、macOS）、`analysis.yml`（pytest）。macOS と pytest は成功。Windows は windows-latest に VS 2022 が無く失敗 → windows-2022 に変更して再実行中 |
+| 評価用ステムの集まりに対する回帰テスト | 済 | `analysis/run_eval.py`。`data/stems/<曲ID>/drums.wav`（と `hits.csv`）を置けば表が出る |
+| M0 判定書のひな形 | 済 | `docs/phase0/M0判定.md` |
 | 評価用ステムの収集 | 未 | Takahiro の手元で行う |
 | 採譜の試作 | 未 | |
 | 切り出しと層 | 未 | |

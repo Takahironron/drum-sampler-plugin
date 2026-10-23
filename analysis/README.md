@@ -20,6 +20,7 @@ pip install -r analysis/requirements.txt
 | `baseline_transcribe.py` | 学習モデル無しの採譜（基準値） | `python analysis/baseline_transcribe.py ステム.wav 推定.csv` |
 | `extract_kit.py` | 重ならない打の切り出し → 強さ別の層 → キット（M0-2 の材料） | `python analysis/extract_kit.py ステム.wav 打点.csv 出力先 --render 再現.wav` |
 | `fit_fx.py` | 固定の形のエフェクトチェーンの当てはめ（M0-3） | `python analysis/fit_fx.py 乾いた音.wav 目標.wav --out params.json --render 当てはめ後.wav` |
+| `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト） | `python analysis/run_eval.py data/stems --out docs/phase0/結果_2026-11-01.md` |
 
 - 正解・推定の打点は CSV（`time_sec,class[,velocity]`）か MIDI（GM ドラムマップ、チャンネル10）。種類の名前は `drumeval/labels.py` の `FINE_TO_COARSE` を見る。採点では粗い5種（kick / snare / hihat / tom / cymbal）にまとめる。
 - 時刻の許容誤差は ±50 ms。M0-1 は kick / snare / hihat の F 値の単純平均。
