@@ -1,0 +1,3 @@
+# 学習したモデル（バイナリと付属の設定はコミットしない。作り方は train_transcriber.py）
+*.onnx
+*.json

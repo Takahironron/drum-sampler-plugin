@@ -37,7 +37,7 @@ cmake --build build --target DrumSamplerPlugin_VST3 DrumSamplerPlugin_Standalone
 
 - JUCE は AGPLv3 と商用ライセンスの二本立て。JUCE 8 ではスプラッシュ画面のフラグ（`JUCE_DISPLAY_SPLASH_SCREEN`）は使われない（ビルド時の JUCE の警告で確認）。販売前の条件は `docs/phase0/ライセンス一覧.md`。
 - VST3 SDK は JUCE に同梱される。JUCE 8.0.15 の同梱版は 3.8.0 で MIT（2026-10-23 に `LICENSE.txt` を確認）。閉じたソースの配布に契約の署名は不要。VST の名称・ロゴを使うなら Steinberg の商標ガイドラインに従う。
-- Linux でビルドして VST3 と Standalone ができることは確認済（2026-10-23）。Windows でのビルドと pluginval は GitHub Actions と Takahiro の手元で確認する。
+- GitHub Actions で Windows（windows-2022、VS 2022）・Linux・macOS のビルドが通り、Windows で pluginval（strictness 5）が SUCCESS（2026-10-23）。Takahiro の手元での確認は未。
 
 ## 次の段階（Phase 1）へ向けて
 

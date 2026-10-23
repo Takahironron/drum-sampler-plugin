@@ -1,0 +1,5 @@
+# 採譜モデルの学習と ONNX 書き出しに必要な追加の依存（requirements.txt の後に入れる）。
+# CPU 版の PyTorch: pip install --index-url https://download.pytorch.org/whl/cpu torch
+torch>=2.2
+onnx>=1.15
+onnxruntime>=1.17

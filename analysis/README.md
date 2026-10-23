@@ -9,6 +9,9 @@
 python3 -m venv .venv
 . .venv/bin/activate          # Windows は .venv\Scripts\activate
 pip install -r analysis/requirements.txt
+# 採譜モデルの学習と ONNX（任意）
+pip install --index-url https://download.pytorch.org/whl/cpu torch
+pip install -r analysis/requirements-ml.txt
 ```
 
 ## 採点スクリプト
@@ -21,6 +24,8 @@ pip install -r analysis/requirements.txt
 | `extract_kit.py` | 重ならない打の切り出し → 強さ別の層 → キット（M0-2 の材料） | `python analysis/extract_kit.py ステム.wav 打点.csv 出力先 --render 再現.wav` |
 | `fit_fx.py` | 固定の形のエフェクトチェーンの当てはめ（M0-3） | `python analysis/fit_fx.py 乾いた音.wav 目標.wav --out params.json --render 当てはめ後.wav` |
 | `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト） | `python analysis/run_eval.py data/stems --out docs/phase0/結果_2026-11-01.md` |
+| `train_transcriber.py` | 合成データで小さな CRNN を学習し ONNX に書き出す | `python analysis/train_transcriber.py --steps 600` |
+| `transcribe_onnx.py` | ONNX の採譜モデルを ONNX Runtime で動かす | `python analysis/transcribe_onnx.py analysis/models/crnn_synth.onnx ステム.wav 推定.csv` |
 
 - 正解・推定の打点は CSV（`time_sec,class[,velocity]`）か MIDI（GM ドラムマップ、チャンネル10）。種類の名前は `drumeval/labels.py` の `FINE_TO_COARSE` を見る。採点では粗い5種（kick / snare / hihat / tom / cymbal）にまとめる。
 - 時刻の許容誤差は ±50 ms。M0-1 は kick / snare / hihat の F 値の単純平均。
@@ -46,13 +51,20 @@ pip install -r analysis/requirements.txt
 - 合成テスト（既知のパラメータを掛けた音を目標にする）では、距離が 4.8 → 0.2 まで下がり、パラメータも正解に近づく（`tests/test_fx.py`）。実ステムでは「乾いた音」の基準が要るので、`extract_kit.py --render` の再現や内蔵ライブラリの音を乾いた音として使う。
 - PyTorch の微分可能な版（計画書 3.5 の手順 3）は、実ステムでこの形が効くと分かってから書く。
 
+## 採譜モデル（`drumeval/features.py`、`model.py`、`infer.py`）
+
+- 特徴量は対数メル（22.05 kHz、窓 1024、ホップ 220 ≒ 10 ms、64 バンド）。numpy だけで書き、C++ に同じ計算を移せるようにしている。
+- モデルは小さな CRNN（畳み込み2段 → 双方向 GRU → 各フレーム・各種類の確率）。打点はしきい値と局所最大で拾う。
+- `train_transcriber.py` は `synth.py` の乱数パターン（テンポ・強さ・音色の揺らぎ・にじみ・残響）で学習し、ONNX に書き出して ONNX Runtime と PyTorch の出力が一致することを確かめる。これは**道具立ての確認**で、実曲の精度の主張ではない。実データ（E-GMD など、CC BY 4.0）で学習するときは `make_batch` を差し替える。
+- 学習したモデル（`models/*.onnx`）はコミットしない。
+
 ## テスト
 
 ```
 cd analysis && python -m pytest -q tests
 ```
 
-合成データで指標の動き（完全一致で 1、許容誤差の外で 0、EQ を変えると距離が増える、など）と、ラベル → 合成音 → 基準値の採譜 → 採点 の通しを確かめる。
+合成データで指標の動き（完全一致で 1、許容誤差の外で 0、EQ を変えると距離が増える、など）と、ラベル → 合成音 → 基準値の採譜 → 採点 の通し、切り出し → キット → 再生、エフェクトの当てはめ、学習 → ONNX → ONNX Runtime を確かめる。torch が無ければ学習のテストは飛ばす。
 
 ## データの置き場（コミットしない）
 

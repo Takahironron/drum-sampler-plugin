@@ -17,30 +17,40 @@ import numpy as np
 from .labels import Hit, to_coarse
 
 
-def _kick(sr: int, rng: np.random.Generator) -> np.ndarray:
+def _v(rng: np.random.Generator, variation: float, lo: float, hi: float) -> float:
+    """揺らぎ: variation=0 で 1.0、それ以外は [lo, hi] の対数一様から variation の割合で寄せる。"""
+    if variation <= 0:
+        return 1.0
+    r = np.exp(rng.uniform(np.log(lo), np.log(hi)))
+    return float(1.0 + variation * (r - 1.0))
+
+
+def _kick(sr: int, rng: np.random.Generator, variation: float = 0.0) -> np.ndarray:
     n = int(0.5 * sr)
     t = np.arange(n) / sr
-    freq = 45.0 + 110.0 * np.exp(-t * 35.0)
+    f0 = 45.0 * _v(rng, variation, 0.7, 1.5)
+    freq = f0 + 110.0 * _v(rng, variation, 0.5, 1.5) * np.exp(-t * 35.0 * _v(rng, variation, 0.5, 2.0))
     phase = 2 * np.pi * np.cumsum(freq) / sr
-    env = np.exp(-t * 7.0)
-    click = np.exp(-t * 400.0) * 0.4
+    env = np.exp(-t * 7.0 * _v(rng, variation, 0.5, 2.0))
+    click = np.exp(-t * 400.0) * 0.4 * _v(rng, variation, 0.3, 2.0)
     return np.tanh(1.6 * (np.sin(phase) * env + click)) * 0.9
 
 
-def _snare(sr: int, rng: np.random.Generator) -> np.ndarray:
+def _snare(sr: int, rng: np.random.Generator, variation: float = 0.0) -> np.ndarray:
     n = int(0.35 * sr)
     t = np.arange(n) / sr
-    body = (0.6 * np.sin(2 * np.pi * 185.0 * t) + 0.4 * np.sin(2 * np.pi * 330.0 * t)) * np.exp(-t * 25.0)
-    snares = rng.uniform(-1, 1, n) * np.exp(-t * 14.0) * 0.6
+    f1 = 185.0 * _v(rng, variation, 0.7, 1.4)
+    body = (0.6 * np.sin(2 * np.pi * f1 * t) + 0.4 * np.sin(2 * np.pi * f1 * 1.78 * t)) * np.exp(-t * 25.0 * _v(rng, variation, 0.5, 2.0))
+    snares = rng.uniform(-1, 1, n) * np.exp(-t * 14.0 * _v(rng, variation, 0.5, 2.0)) * 0.6 * _v(rng, variation, 0.5, 1.5)
     return np.tanh(body + snares) * 0.8
 
 
-def _hihat(sr: int, rng: np.random.Generator) -> np.ndarray:
-    n = int(0.12 * sr)
+def _hihat(sr: int, rng: np.random.Generator, variation: float = 0.0) -> np.ndarray:
+    n = int(0.12 * sr * _v(rng, variation, 0.5, 2.5))
     t = np.arange(n) / sr
     x = rng.uniform(-1, 1, n)
     # 1次ハイパス（6 kHz）
-    rc = 1.0 / (2 * np.pi * 6000.0)
+    rc = 1.0 / (2 * np.pi * 6000.0 * _v(rng, variation, 0.6, 1.5))
     a = rc / (rc + 1.0 / sr)
     y = np.empty(n)
     prev_in = prev_out = 0.0
@@ -51,19 +61,19 @@ def _hihat(sr: int, rng: np.random.Generator) -> np.ndarray:
     return y * np.exp(-t * 45.0) * 0.5
 
 
-def _tom(sr: int, rng: np.random.Generator) -> np.ndarray:
+def _tom(sr: int, rng: np.random.Generator, variation: float = 0.0) -> np.ndarray:
     n = int(0.4 * sr)
     t = np.arange(n) / sr
-    freq = 110.0 + 40.0 * np.exp(-t * 20.0)
+    freq = 110.0 * _v(rng, variation, 0.7, 1.6) + 40.0 * np.exp(-t * 20.0)
     phase = 2 * np.pi * np.cumsum(freq) / sr
     return np.sin(phase) * np.exp(-t * 9.0) * 0.8
 
 
-def _cymbal(sr: int, rng: np.random.Generator) -> np.ndarray:
+def _cymbal(sr: int, rng: np.random.Generator, variation: float = 0.0) -> np.ndarray:
     n = int(1.0 * sr)
     t = np.arange(n) / sr
     x = rng.uniform(-1, 1, n)
-    rc = 1.0 / (2 * np.pi * 3000.0)
+    rc = 1.0 / (2 * np.pi * 3000.0 * _v(rng, variation, 0.6, 1.5))
     a = rc / (rc + 1.0 / sr)
     y = np.empty(n)
     prev_in = prev_out = 0.0
@@ -84,14 +94,16 @@ def render(
     bleed: float = 0.0,
     reverb_tail: float = 0.0,
     seed: int = 0,
+    variation: float = 0.0,
 ) -> np.ndarray:
     """打点ラベルをモノラルの波形にする。
 
     - `bleed`: 0〜1。ベースの残りを模した低域の雑音と、全帯域の薄い雑音を足す。
     - `reverb_tail`: 秒。0 より大きければ指数減衰の雑音で畳み込む（残響の代わり）。
+    - `variation`: 0〜1。音色（音程・減衰・長さ）に乱数の揺らぎを入れる（学習データの多様性用）。
     """
     rng = np.random.default_rng(seed)
-    samples = {k: g(sr, rng) for k, g in _GENERATORS.items()}
+    samples = {k: g(sr, rng, variation) for k, g in _GENERATORS.items()}
     last = max((h.time for h in hits), default=0.0)
     if duration is None:
         duration = last + 1.2

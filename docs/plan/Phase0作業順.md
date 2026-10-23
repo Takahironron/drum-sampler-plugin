@@ -63,15 +63,16 @@
 | 採点スクリプト（F 値、STFT 距離） | 済 | `analysis/`、合成データのテスト付き |
 | 基準値の採譜（学習モデル無し）と合成音の描画 | 済 | `analysis/drumeval/baseline.py`、`synth.py`。通しテスト付き |
 | 切り出し → 強さ別の層 → キットで再生（試作） | 済（合成音で確認） | `analysis/drumeval/extract.py`、`extract_kit.py`。実ステムでの聞き比べは評価用ステムが揃ってから |
+| 採譜モデルの道具立て（対数メル → CRNN → ONNX → ONNX Runtime） | 済（合成データで確認） | `analysis/train_transcriber.py`、`transcribe_onnx.py`。実データ（E-GMD）での学習は未 |
 | エフェクトの当てはめ（合成テスト） | 済（合成音で確認） | `analysis/drumeval/fx.py`、`fit_fx.py`。ゲイン・3バンド EQ・リバーブを Powell 法で当てはめ、距離 4.8 → 0.2。コンプ・歪み・ゲートと PyTorch 版は未 |
 | 評価用ステム一覧のひな形 | 済 | `docs/phase0/評価用ステム一覧.md` |
 | ライセンス一覧 | 済（要確認 7件残り） | `docs/phase0/ライセンス一覧.md`。VST3 SDK は MIT、JUCE 8 Starter はスプラッシュ不要。CLAUDE.md と計画書に反映済 |
-| JUCE の空のプラグイン | 着手 | `plugin/`。Linux でビルド確認済。Windows でのビルドと pluginval は未確認（CI と手元で確認） |
-| GitHub Actions | 着手 | `.github/workflows/build.yml`（Windows + pluginval、Linux、macOS）、`analysis.yml`（pytest）。macOS と pytest は成功。Windows は windows-latest に VS 2022 が無く失敗 → windows-2022 に変更して再実行中 |
+| JUCE の空のプラグイン | 済（CI で確認） | `plugin/`。Linux・macOS・Windows でビルドが通り、Windows で pluginval（strictness 5）が SUCCESS（GitHub Actions run 39992012702、2026-10-23）。Takahiro の手元（VS 2022）での確認は未 |
+| GitHub Actions | 済 | `.github/workflows/build.yml`（Windows + pluginval、Linux、macOS）、`analysis.yml`（pytest）。全ジョブ成功。windows-latest には VS 2022 が無いので windows-2022 を使う |
 | 評価用ステムの集まりに対する回帰テスト | 済 | `analysis/run_eval.py`。`data/stems/<曲ID>/drums.wav`（と `hits.csv`）を置けば表が出る |
 | M0 判定書のひな形 | 済 | `docs/phase0/M0判定.md` |
 | 評価用ステムの収集 | 未 | Takahiro の手元で行う |
-| 採譜の試作 | 未 | |
-| 切り出しと層 | 未 | |
-| エフェクトの当てはめ | 未 | |
+| 採譜の試作（公開モデルの基準値、E-GMD での学習） | 未 | 評価用ステムと E-GMD の入手が要る |
+| 切り出しと層（実ステムでの聞き比べ） | 未 | 評価用ステムが要る |
+| エフェクトの当てはめ（実ステム、コンプ・歪み・ゲート、PyTorch 版） | 未 | |
 | M0 の判定 | 未 | |
