@@ -63,10 +63,11 @@
 | 採点スクリプト（F 値、STFT 距離） | 済 | `analysis/`、合成データのテスト付き |
 | 基準値の採譜（学習モデル無し）と合成音の描画 | 済 | `analysis/drumeval/baseline.py`、`synth.py`。通しテスト付き |
 | 切り出し → 強さ別の層 → キットで再生（試作） | 済（合成音で確認） | `analysis/drumeval/extract.py`、`extract_kit.py`。実ステムでの聞き比べは評価用ステムが揃ってから |
+| エフェクトの当てはめ（合成テスト） | 済（合成音で確認） | `analysis/drumeval/fx.py`、`fit_fx.py`。ゲイン・3バンド EQ・リバーブを Powell 法で当てはめ、距離 4.8 → 0.2。コンプ・歪み・ゲートと PyTorch 版は未 |
 | 評価用ステム一覧のひな形 | 済 | `docs/phase0/評価用ステム一覧.md` |
 | ライセンス一覧 | 済（要確認 7件残り） | `docs/phase0/ライセンス一覧.md`。VST3 SDK は MIT、JUCE 8 Starter はスプラッシュ不要。CLAUDE.md と計画書に反映済 |
 | JUCE の空のプラグイン | 着手 | `plugin/`。Linux でビルド確認済。Windows でのビルドと pluginval は未確認（CI と手元で確認） |
-| GitHub Actions | 着手 | `.github/workflows/build.yml`（Windows + pluginval、Linux、macOS）、`analysis.yml`（pytest）。初回の実行結果は未確認 |
+| GitHub Actions | 着手 | `.github/workflows/build.yml`（Windows + pluginval、Linux、macOS）、`analysis.yml`（pytest）。macOS と pytest は成功。Windows は windows-latest に VS 2022 が無く失敗 → windows-2022 に変更して再実行中 |
 | 評価用ステムの収集 | 未 | Takahiro の手元で行う |
 | 採譜の試作 | 未 | |
 | 切り出しと層 | 未 | |

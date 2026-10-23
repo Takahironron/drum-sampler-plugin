@@ -19,6 +19,7 @@ pip install -r analysis/requirements.txt
 | `stft_distance.py` | 多重解像度 STFT 距離（M0-3、切り出しの信頼度） | `python analysis/stft_distance.py 元のステム.wav 再現.wav` |
 | `baseline_transcribe.py` | 学習モデル無しの採譜（基準値） | `python analysis/baseline_transcribe.py ステム.wav 推定.csv` |
 | `extract_kit.py` | 重ならない打の切り出し → 強さ別の層 → キット（M0-2 の材料） | `python analysis/extract_kit.py ステム.wav 打点.csv 出力先 --render 再現.wav` |
+| `fit_fx.py` | 固定の形のエフェクトチェーンの当てはめ（M0-3） | `python analysis/fit_fx.py 乾いた音.wav 目標.wav --out params.json --render 当てはめ後.wav` |
 
 - 正解・推定の打点は CSV（`time_sec,class[,velocity]`）か MIDI（GM ドラムマップ、チャンネル10）。種類の名前は `drumeval/labels.py` の `FINE_TO_COARSE` を見る。採点では粗い5種（kick / snare / hihat / tom / cymbal）にまとめる。
 - 時刻の許容誤差は ±50 ms。M0-1 は kick / snare / hihat の F 値の単純平均。
@@ -36,6 +37,13 @@ pip install -r analysis/requirements.txt
 - 打点に強さが無ければ、打点直後 20 ms のピークを種類ごとの分布で 1〜127 に割り当てる（計画書 3.2）。
 - `--render` で同じ打点をキットで鳴らし直し、元のステムとの STFT 距離を出す。聞き比べ（M0-2）はこの2つの WAV で行う。
 - 尾の延長（次の打で切れた分）は Phase 2 の課題で、ここではやらない。
+
+## エフェクトの当てはめ（`drumeval/fx.py`）
+
+- チェーンは固定: 入力ゲイン → EQ（ローシェルフ 100 Hz、ピーキング、ハイシェルフ 5 kHz）→ リバーブ（RT60、高域の減衰、混ぜる量）。コンプ・歪み・ゲートはまだ無い。
+- 初期値は解析的に出す（帯域ごとの長期スペクトルの差 → EQ とゲイン、目標の尾の減衰 → RT60）。そこから scipy の Powell 法（勾配なし）で多重解像度 STFT 距離を小さくする。
+- 合成テスト（既知のパラメータを掛けた音を目標にする）では、距離が 4.8 → 0.2 まで下がり、パラメータも正解に近づく（`tests/test_fx.py`）。実ステムでは「乾いた音」の基準が要るので、`extract_kit.py --render` の再現や内蔵ライブラリの音を乾いた音として使う。
+- PyTorch の微分可能な版（計画書 3.5 の手順 3）は、実ステムでこの形が効くと分かってから書く。
 
 ## テスト
 
