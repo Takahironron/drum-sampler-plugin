@@ -129,20 +129,25 @@ def save_hits_csv(hits: Iterable[Hit], path: str | Path) -> None:
             w.writerow([f"{h.time:.6f}", h.cls, "" if h.velocity is None else h.velocity])
 
 
-def load_hits_midi(path: str | Path, note_map: dict[int, str] | None = None) -> list[Hit]:
+def load_hits_midi(path: str | Path, note_map: dict[int, str] | None = None, channel: int | None = 9) -> list[Hit]:
     """MIDI ファイルのノートオン（velocity > 0）を打点として読む。
 
     すべてのトラックをまとめ、テンポ変化も `mido` に任せて秒に直す。
+    `channel` はドラムのチャンネル（0 始まりで 9 = GM の 10ch）。そのチャンネルにノートが無ければ全チャンネルを読む
+    （ドラムだけを別チャンネルで書き出したファイル向け）。`channel=None` で常に全チャンネル。
     """
     import mido  # 遅延 import（CSV だけのときは要らない）
 
     note_map = GM_DRUM_MAP if note_map is None else note_map
     mid = mido.MidiFile(str(path))
-    hits: list[Hit] = []
+    events: list[tuple[float, int, int, int]] = []  # (秒, channel, note, velocity)
     t = 0.0
     for msg in mid:  # mido が各メッセージの時間差を秒で返す
         t += msg.time
-        if msg.type == "note_on" and msg.velocity > 0 and msg.note in note_map:
-            hits.append(Hit(t, note_map[msg.note], msg.velocity))
+        if msg.type == "note_on" and msg.velocity > 0:
+            events.append((t, msg.channel, msg.note, msg.velocity))
+    if channel is not None and any(ch == channel for _, ch, _, _ in events):
+        events = [e for e in events if e[1] == channel]
+    hits = [Hit(t, note_map[n], v) for t, _, n, v in events if n in note_map]
     hits.sort(key=lambda h: h.time)
     return hits

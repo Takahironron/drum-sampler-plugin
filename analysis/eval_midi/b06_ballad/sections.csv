@@ -1,0 +1,7 @@
+start_sec,end_sec,label
+0.000,13.333,Intro
+13.333,40.000,Verse
+40.000,66.667,Chorus
+66.667,93.333,Verse
+93.333,120.000,Chorus
+120.000,133.333,Outro

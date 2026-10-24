@@ -24,6 +24,7 @@ pip install -r analysis/requirements-ml.txt
 | `extract_kit.py` | 重ならない打の切り出し → 強さ別の層 → キット（M0-2 の材料） | `python analysis/extract_kit.py ステム.wav 打点.csv 出力先 --render 再現.wav` |
 | `fit_fx.py` | 固定の形のエフェクトチェーンの当てはめ（M0-3） | `python analysis/fit_fx.py 乾いた音.wav 目標.wav --out params.json --render 当てはめ後.wav` |
 | `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト） | `python analysis/run_eval.py data/stems --out docs/phase0/結果_2026-11-01.md` |
+| `make_eval_midi.py` | 区分 B の評価用 MIDI 曲（正解の打点・区間ラベル付き）を生成 | `python analysis/make_eval_midi.py --out analysis/eval_midi` |
 | `train_transcriber.py` | 合成データで小さな CRNN を学習し ONNX に書き出す | `python analysis/train_transcriber.py --steps 600` |
 | `transcribe_onnx.py` | ONNX の採譜モデルを ONNX Runtime で動かす | `python analysis/transcribe_onnx.py analysis/models/crnn_synth.onnx ステム.wav 推定.csv` |
 
@@ -65,6 +66,10 @@ cd analysis && python -m pytest -q tests
 ```
 
 合成データで指標の動き（完全一致で 1、許容誤差の外で 0、EQ を変えると距離が増える、など）と、ラベル → 合成音 → 基準値の採譜 → 採点 の通し、切り出し → キット → 再生、エフェクトの当てはめ、学習 → ONNX → ONNX Runtime を確かめる。torch が無ければ学習のテストは飛ばす。
+
+## 評価用の MIDI 曲（`eval_midi/`）
+
+`make_eval_midi.py` で生成した 7 曲（ドラム ch 10 ＋ベース＋コード＋リード、`hits.csv` と `sections.csv` 付き）。自作の内容なのでコミットしてある。`data/stems/` にコピーし、DAW の VST で書き出して SpectraLayers で分離した `drums.wav` を足すと、正解付きの評価用ステムになる（手順は各フォルダの README）。
 
 ## データの置き場（コミットしない）
 

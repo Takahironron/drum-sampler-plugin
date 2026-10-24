@@ -71,7 +71,8 @@
 | GitHub Actions | 済 | `.github/workflows/build.yml`（Windows + pluginval、Linux、macOS）、`analysis.yml`（pytest）。全ジョブ成功。windows-latest には VS 2022 が無いので windows-2022 を使う |
 | 評価用ステムの集まりに対する回帰テスト | 済 | `analysis/run_eval.py`。`data/stems/<曲ID>/drums.wav`（と `hits.csv`）を置けば表が出る |
 | M0 判定書のひな形 | 済 | `docs/phase0/M0判定.md` |
-| 評価用ステムの収集 | 未 | Takahiro の手元で行う |
+| 評価用ステムの内訳と区分 A の候補曲、区分 B の MIDI 曲の生成 | 済 | `docs/phase0/評価用ステム一覧.md`、`analysis/eval_midi/`（7 曲） |
+| 評価用ステムの収集（分離と `drums.wav` の配置） | 未 | Takahiro の手元で行う（CD → SpectraLayers、MIDI 曲 → VST で書き出し → SpectraLayers） |
 | 採譜の試作（公開モデルの基準値、E-GMD での学習） | 未 | 評価用ステムと E-GMD の入手が要る |
 | 切り出しと層（実ステムでの聞き比べ） | 未 | 評価用ステムが要る |
 | エフェクトの当てはめ（実ステム、コンプ・歪み・ゲート、PyTorch 版） | 未 | |
