@@ -24,6 +24,7 @@ pip install -r analysis/requirements-ml.txt
 | `extract_kit.py` | 重ならない打の切り出し → 強さ別の層 → キット（M0-2 の材料） | `python analysis/extract_kit.py ステム.wav 打点.csv 出力先 --render 再現.wav` |
 | `fit_fx.py` | 固定の形のエフェクトチェーンの当てはめ（M0-3） | `python analysis/fit_fx.py 乾いた音.wav 目標.wav --out params.json --render 当てはめ後.wav` |
 | `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト） | `python analysis/run_eval.py data/stems --out docs/phase0/結果_2026-11-01.md` |
+| `list_itunes_library.py` | iTunes の書き出し（XML かテキスト）をジャンル別の一覧にする（区分 A の選曲用） | `python analysis/list_itunes_library.py ライブラリ.xml --out docs/phase0/itunes一覧.md` |
 | `make_eval_midi.py` | 区分 B の評価用 MIDI 曲（正解の打点・区間ラベル付き）を生成 | `python analysis/make_eval_midi.py --out analysis/eval_midi` |
 | `train_transcriber.py` | 合成データで小さな CRNN を学習し ONNX に書き出す | `python analysis/train_transcriber.py --steps 600` |
 | `transcribe_onnx.py` | ONNX の採譜モデルを ONNX Runtime で動かす | `python analysis/transcribe_onnx.py analysis/models/crnn_synth.onnx ステム.wav 推定.csv` |
