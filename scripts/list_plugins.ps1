@@ -1,6 +1,9 @@
 # Windows に入っているプラグイン（VST3／VST2／CLAP）と Native Instruments 製品の一覧をテキストに書く。
 # 使い方: PowerShell で  powershell -ExecutionPolicy Bypass -File scripts\list_plugins.ps1
+#        別のフォルダも見るなら  powershell -ExecutionPolicy Bypass -File scripts\list_plugins.ps1 -Extra "E:\VST","F:\Plugins"
 # 出力: デスクトップの plugins.txt（パスと更新日だけ。音声や設定には触れない）
+
+param([string[]]$Extra = @())
 
 $out = Join-Path ([Environment]::GetFolderPath("Desktop")) "plugins.txt"
 $lines = @()
@@ -8,6 +11,7 @@ $lines += "# プラグイン一覧 " + (Get-Date -Format "yyyy-MM-dd HH:mm")
 $lines += ""
 
 $dirs = @(
+    "D:\Music\Plugin",  # Takahiro のプラグインの置き場（2026-10-25）
     "$env:ProgramFiles\Common Files\VST3",
     "$env:ProgramFiles\Common Files\CLAP",
     "$env:ProgramFiles\Common Files\VST2",
@@ -18,7 +22,7 @@ $dirs = @(
     "${env:ProgramFiles(x86)}\Steinberg\VSTPlugins",
     "$env:LOCALAPPDATA\Programs\Common\VST3",
     "$env:LOCALAPPDATA\Programs\Common\CLAP"
-)
+) + $Extra
 
 foreach ($d in $dirs) {
     if (-not (Test-Path $d)) { continue }
