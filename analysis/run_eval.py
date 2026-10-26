@@ -6,7 +6,7 @@
     python run_eval.py data/stems [--out docs/phase0/結果_YYYY-MM-DD.md] [--est-dir 推定の置き場] [--max-seconds 60]
 
 各曲のフォルダ:
-    drums.wav            分離済みのドラムのステム（必須）
+    drums.wav | .flac    分離済みのドラムのステム（必須）
     hits.csv | hits.mid  打点の正解（あれば M0-1 を出す）
 
 採譜の推定は、`--est-dir` に `<曲ID>.csv` があればそれを使い、無ければ基準値（`baseline_transcribe`）で作る。
@@ -32,7 +32,7 @@ from stft_distance import load_mono  # noqa: E402
 
 
 def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float) -> dict:
-    wav = song_dir / "drums.wav"
+    wav = next(p for p in (song_dir / "drums.wav", song_dir / "drums.flac") if p.exists())
     x, sr = load_mono(str(wav), None)
     if max_seconds and x.size > max_seconds * sr:
         x = x[: int(max_seconds * sr)]
@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-seconds", type=float, default=60.0, help="曲の先頭から使う長さ（0 で全部）")
     args = ap.parse_args(argv)
 
-    stems = sorted(p for p in Path(args.stems_dir).iterdir() if (p / "drums.wav").exists())
+    stems = sorted(p for p in Path(args.stems_dir).iterdir() if (p / "drums.wav").exists() or (p / "drums.flac").exists())
     if not stems:
         print("drums.wav のあるフォルダが見つからない:", args.stems_dir, file=sys.stderr)
         return 1
