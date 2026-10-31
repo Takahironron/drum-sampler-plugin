@@ -1,0 +1,19 @@
+{
+  "features": {
+    "sr": 22050,
+    "n_fft": 1024,
+    "hop": 220,
+    "n_mels": 64,
+    "f_min": 30.0,
+    "f_max": 11000.0
+  },
+  "classes": [
+    "kick",
+    "snare",
+    "hihat"
+  ],
+  "threshold": 0.5,
+  "trained_on": "synthetic (drumeval.synth)",
+  "steps": 500,
+  "seed": 0
+}

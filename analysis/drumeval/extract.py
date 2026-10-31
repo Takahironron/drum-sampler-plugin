@@ -87,6 +87,25 @@ def cut_segments(
     return segs
 
 
+def cut_segments_from_parts(
+    parts: dict[str, tuple[np.ndarray, int]],
+    hits: list[Hit],
+    pre_sec: float = 0.1,
+    post_sec: float = 0.15,
+    max_len_sec: float = 1.5,
+) -> list[Segment]:
+    """パート別に分離された音（種類 → (波形, sr)）から切り出す。
+
+    他の種類の打は別のステムにあるので、重なりの判定は同じ種類の打どうしだけで行う。
+    混ざったドラムから切るより、切り出せる打がずっと多くなる。
+    """
+    segs: list[Segment] = []
+    for cls, (x, sr) in parts.items():
+        own = [h for h in hits if to_coarse(h.cls) == cls]
+        segs += cut_segments(x, sr, own, pre_sec=pre_sec, post_sec=post_sec, max_len_sec=max_len_sec)
+    return segs
+
+
 def build_kit(
     segments: list[Segment],
     sr: int,

@@ -72,7 +72,9 @@
 | 評価用ステムの集まりに対する回帰テスト | 済 | `analysis/run_eval.py`。`data/stems/<曲ID>/drums.wav`（と `hits.csv`）を置けば表が出る |
 | M0 判定書のひな形 | 済 | `docs/phase0/M0判定.md` |
 | 評価用ステムの内訳と区分 A の候補曲、区分 B の MIDI 曲の生成 | 済 | `docs/phase0/評価用ステム一覧.md`、`analysis/eval_midi/`（7 曲） |
-| 評価用ステムの収集（分離と `drums.wav` の配置） | 未 | Takahiro の手元で行う（CD → SpectraLayers、MIDI 曲 → VST で書き出し → SpectraLayers） |
+| 評価用ステムの収集（区分 A） | 済 | 10 曲を SpectraLayers で分離し `data/stems/a01〜a10` に配置（2026-10-31）。7 曲にはパート別ステムもある |
+| 区分 A の最初の評価 | 済 | `docs/phase0/結果_2026-10-31.md`。基準値採譜は実ステムで M0-1 0.31（疑似正解）、混合からの切り出しは打が足りない → パート別ステムからの採譜・切り出しに切り替え |
+| 評価用ステムの収集（区分 B） | 未 | MIDI 曲 → VST で書き出し → SpectraLayers |
 | 採譜の試作（公開モデルの基準値、E-GMD での学習） | 未 | 評価用ステムと E-GMD の入手が要る |
 | 切り出しと層（実ステムでの聞き比べ） | 未 | 評価用ステムが要る |
 | エフェクトの当てはめ（実ステム、コンプ・歪み・ゲート、PyTorch 版） | 未 | |

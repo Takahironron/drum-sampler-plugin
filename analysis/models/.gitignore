@@ -1,3 +1,6 @@
-# 学習したモデル（バイナリと付属の設定はコミットしない。作り方は train_transcriber.py）
+# 学習したモデルは原則コミットしない（作り方は train_transcriber.py）。
+# 例外: 合成データで学習した小さな v0 は、手元で比較に使えるようにコミットしてある。
 *.onnx
 *.json
+!crnn_synth_v0.onnx
+!crnn_synth_v0.json
