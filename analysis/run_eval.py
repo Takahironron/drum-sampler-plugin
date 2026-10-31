@@ -101,6 +101,38 @@ def list_songs(stems_dir: Path) -> list[tuple[str, Path, Path]]:
     return songs
 
 
+def write_hits_midi(hits: list[Hit], path: Path, bpm: float = 120.0) -> None:
+    """打点を GM ドラムマップの MIDI にする（DAW に読み込んで元の音と並べて確かめる用）。"""
+    import mido
+
+    note_of = {"kick": 36, "snare": 38, "hihat": 42, "tom": 45, "cymbal": 49}
+    mid = mido.MidiFile(type=0, ticks_per_beat=480)
+    tr = mido.MidiTrack()
+    mid.tracks.append(tr)
+    tr.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(bpm), time=0))
+    events = []
+    for h in hits:
+        tick = int(round(h.time * bpm / 60.0 * 480))
+        note = note_of.get(to_coarse(h.cls), 39)
+        vel = h.velocity or 100
+        events.append((tick, 1, mido.Message("note_on", channel=9, note=note, velocity=vel, time=0)))
+        events.append((tick + 48, 0, mido.Message("note_off", channel=9, note=note, velocity=0, time=0)))
+    events.sort(key=lambda e: (e[0], e[1]))
+    last = 0
+    for tick, _, msg in events:
+        msg.time = tick - last
+        last = tick
+        tr.append(msg)
+    mid.save(str(path))
+
+
+def _match_rms(y: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """y の RMS を x に合わせる（全体の音量差で STFT 距離が膨らまないようにする）。"""
+    rx = np.sqrt(np.mean(x**2)) + 1e-9
+    ry = np.sqrt(np.mean(y**2)) + 1e-9
+    return y * (rx / ry)
+
+
 def _counts(hits: list[Hit]) -> str:
     from collections import Counter
 
@@ -109,7 +141,7 @@ def _counts(hits: list[Hit]) -> str:
 
 
 def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song_id: str | None = None, wav: Path | None = None,
-                  model: str | None = None, render: bool = False) -> dict:
+                  model: str | None = None, render: bool = False, threshold: float | None = None) -> dict:
     wav = wav or find_stem(song_dir)
     x, sr = load_mono(str(wav), None)
     if max_seconds and x.size > max_seconds * sr:
@@ -122,8 +154,8 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
     elif model:
         from drumeval.infer import transcribe_onnx
 
-        est = transcribe_onnx(x, sr, model)
-        row["est_source"] = Path(model).stem
+        est = transcribe_onnx(x, sr, model, threshold)
+        row["est_source"] = Path(model).stem + ("" if threshold is None else f"@{threshold:g}")
     else:
         est = transcribe(x, sr)
         row["est_source"] = "baseline"
@@ -137,7 +169,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
         ref = [h for h in load_hits(truth_path) if h.time < x.size / sr]
         row["truth"] = "正解"
     elif all(c in parts for c in M0_CLASSES):
-        ref = pseudo_truth_from_parts({c: parts[c] for c in M0_CLASSES}, x.size / sr, sr)
+        ref = pseudo_truth_from_parts(parts, x.size / sr, sr)  # シンバル・タムのステムがあればそれも含める
         row["truth"] = "疑似（パート別ステム）"
         from drumeval import save_hits_csv
 
@@ -158,7 +190,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
     row["n_isolated"] = len(segs)
     row["layers"] = ", ".join(f"{c}:{len(ls)}/{kit.n_samples(c)}" for c, ls in kit.parts.items())
     if kit.parts:
-        y = render_kit(hits, kit, duration=x.size / sr)
+        y = _match_rms(render_kit(hits, kit, duration=x.size / sr), x)
         row["stft_rerender"] = multi_resolution_stft_distance(x, y)["total"]
         if render:
             import soundfile as sf
@@ -179,10 +211,15 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
         ref_v.sort(key=lambda h: h.time)
         segs_p = cut_segments_from_parts(part_audio, ref_v)
         kit_p = build_kit(segs_p, sr)
+        total = np.zeros_like(x)
+        for c, (px, psr) in part_audio.items():
+            total[: px.size] += px
+        row["stft_parts_sum"] = multi_resolution_stft_distance(x, _match_rms(total, x))["total"]  # 分離の整合性（0 に近いほどパートの和が元に等しい）
+        write_hits_midi(ref_v, song_dir / "hits_pseudo.mid")  # DAW で確かめる用
         row["n_isolated_parts"] = len(segs_p)
         row["layers_parts"] = ", ".join(f"{c}:{len(ls)}/{kit_p.n_samples(c)}" for c, ls in kit_p.parts.items())
         if kit_p.parts:
-            yp = render_kit(ref_v, kit_p, duration=x.size / sr)
+            yp = _match_rms(render_kit(ref_v, kit_p, duration=x.size / sr), x)
             row["stft_rerender_parts"] = multi_resolution_stft_distance(x, yp)["total"]
             if render:
                 import soundfile as sf
@@ -197,9 +234,9 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
 
 def to_markdown(rows: list[dict], title: str) -> str:
     cols = ("id", "seconds", "est_source", "truth", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
-            "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts")
+            "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_sum")
     heads = ("曲ID", "秒", "推定", "正解の種類", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
-             "重ならない打（混合）", "層/音（混合）", "STFT 距離（混合）", "重ならない打（パート別）", "層/音（パート別）", "STFT 距離（パート別）")
+             "重ならない打（混合）", "層/音（混合）", "STFT 距離（混合）", "重ならない打（パート別）", "層/音（パート別）", "STFT 距離（パート別）", "パートの和 vs 元")
     lines = [f"# {title}", "", "| " + " | ".join(heads) + " |", "|" + "---|" * len(heads)]
     def f(v):
         return "" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
@@ -219,6 +256,9 @@ def to_markdown(rows: list[dict], title: str) -> str:
     if dp:
         lines.append(f"- 再現との STFT 距離の平均（パート別ステムから切り出し、{len(dp)} 曲）: {np.mean(dp):.3f}")
     lines.append("- 「種類別」の打数は ki=kick、sn=snare、hi=hihat、to=tom、cy=cymbal。")
+    lines.append("- STFT 距離は、比べる音の RMS を元に合わせてから測る（全体の音量差は見ない）。")
+    lines.append("- 「パートの和 vs 元」は、パート別ステムを足し合わせた音と元のドラムの STFT 距離。分離ツールの出力がどれだけ元を保っているかの目安で、再現の距離の下限に近い。")
+    lines.append("- 疑似正解は各曲のフォルダに hits_pseudo.csv と hits_pseudo.mid（GM ドラムマップ、120 BPM の絶対時刻）で書く。DAW で元の音と並べて確かめられる。")
     return "\n".join(lines) + "\n"
 
 
@@ -230,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-seconds", type=float, default=60.0, help="曲の先頭から使う長さ（0 で全部）")
     ap.add_argument("--model", default=None, help="ONNX の採譜モデル（指定すると基準値の代わりに使う。onnxruntime が要る）")
     ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts）を各曲のフォルダに書く")
+    ap.add_argument("--threshold", type=float, default=None, help="--model の打点のしきい値（既定はモデルの設定、0.5）")
     args = ap.parse_args(argv)
 
     stems_dir = Path(args.stems_dir)
@@ -247,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     for song_id, d, f in songs:
         est = Path(args.est_dir) / f"{song_id}.csv" if args.est_dir else None
         print(f"{song_id} ({f.name}) ...", file=sys.stderr)
-        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render))
+        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
         Path(args.out).write_text(md, encoding="utf-8")
