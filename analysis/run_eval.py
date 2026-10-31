@@ -6,8 +6,9 @@
     python run_eval.py data/stems [--out docs/phase0/結果_YYYY-MM-DD.md] [--est-dir 推定の置き場] [--max-seconds 60]
 
 各曲のフォルダ:
-    drums.wav | .flac    分離済みのドラムのステム（必須）
+    drums.wav | .flac    分離済みのドラムのステム（必須。フォルダ内の音声ファイルが 1 つなら名前は問わない）
     hits.csv | hits.mid  打点の正解（あれば M0-1 を出す）
+フォルダを作らず `data/stems/a01.wav` のように音声ファイルを直接並べてもよい（曲ID はファイル名）。
 
 採譜の推定は、`--est-dir` に `<曲ID>.csv` があればそれを使い、無ければ基準値（`baseline_transcribe`）で作る。
 出力は Markdown の表（曲ごとの F 値、切り出せた打の数と層、再現との STFT 距離）。
@@ -31,12 +32,37 @@ from drumeval.labels import M0_CLASSES  # noqa: E402
 from stft_distance import load_mono  # noqa: E402
 
 
-def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float) -> dict:
-    wav = next(p for p in (song_dir / "drums.wav", song_dir / "drums.flac") if p.exists())
+AUDIO_EXT = (".wav", ".flac", ".aif", ".aiff", ".ogg")
+
+
+def find_stem(song_dir: Path) -> Path | None:
+    """`drums.wav`／`drums.flac` を優先し、無ければフォルダ内の音声ファイルが 1 つだけならそれを使う。"""
+    for name in ("drums.wav", "drums.flac"):
+        if (song_dir / name).exists():
+            return song_dir / name
+    audio = [p for p in song_dir.iterdir() if p.suffix.lower() in AUDIO_EXT and not p.name.startswith("rerender")]
+    return audio[0] if len(audio) == 1 else None
+
+
+def list_songs(stems_dir: Path) -> list[tuple[str, Path, Path]]:
+    """(曲ID, フォルダ, ステムのファイル) の一覧。フォルダごとでも、音声ファイルが直接並んでいてもよい。"""
+    songs = []
+    for p in sorted(stems_dir.iterdir()):
+        if p.is_dir():
+            f = find_stem(p)
+            if f:
+                songs.append((p.name, p, f))
+        elif p.suffix.lower() in AUDIO_EXT:
+            songs.append((p.stem, stems_dir, p))
+    return songs
+
+
+def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song_id: str | None = None, wav: Path | None = None) -> dict:
+    wav = wav or find_stem(song_dir)
     x, sr = load_mono(str(wav), None)
     if max_seconds and x.size > max_seconds * sr:
         x = x[: int(max_seconds * sr)]
-    row: dict = {"id": song_dir.name, "seconds": x.size / sr}
+    row: dict = {"id": song_id or song_dir.name, "seconds": x.size / sr}
 
     if est_csv and est_csv.exists():
         est = load_hits(est_csv)
@@ -90,15 +116,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-seconds", type=float, default=60.0, help="曲の先頭から使う長さ（0 で全部）")
     args = ap.parse_args(argv)
 
-    stems = sorted(p for p in Path(args.stems_dir).iterdir() if (p / "drums.wav").exists() or (p / "drums.flac").exists())
-    if not stems:
-        print("drums.wav のあるフォルダが見つからない:", args.stems_dir, file=sys.stderr)
+    stems_dir = Path(args.stems_dir)
+    if not stems_dir.exists():
+        print(f"フォルダが無い: {stems_dir.resolve()}", file=sys.stderr)
+        return 1
+    songs = list_songs(stems_dir)
+    if not songs:
+        print(f"音声ファイルが見つからない: {stems_dir.resolve()}", file=sys.stderr)
+        print("  期待する形: data/stems/a01/drums.wav（フォルダ内の音声が 1 つなら名前は問わない）か、data/stems/a01.wav", file=sys.stderr)
+        for p in sorted(stems_dir.iterdir()):
+            print("  見つかったもの:", p.name, "(フォルダ)" if p.is_dir() else "", file=sys.stderr)
         return 1
     rows = []
-    for d in stems:
-        est = Path(args.est_dir) / f"{d.name}.csv" if args.est_dir else None
-        print(f"{d.name} ...", file=sys.stderr)
-        rows.append(evaluate_song(d, est, args.max_seconds))
+    for song_id, d, f in songs:
+        est = Path(args.est_dir) / f"{song_id}.csv" if args.est_dir else None
+        print(f"{song_id} ({f.name}) ...", file=sys.stderr)
+        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
         Path(args.out).write_text(md, encoding="utf-8")
