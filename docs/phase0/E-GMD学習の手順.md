@@ -8,6 +8,41 @@ E-GMD（Expanded Groove MIDI Dataset）は Google Magenta が CC BY 4.0 で公�
 - 置き場の例: `D:\data\e-gmd-v1.0.0\`（中に `e-gmd-v1.0.0.csv` と `drummer1\...` がある状態）。
 - 7-Zip なら一部のドラマーだけ展開することもできる（例: `drummer1`〜`drummer3` だけで数十 GB）。CSV は必ず展開する。学習スクリプトは、音声と MIDI の両方があるトラックだけを使う。
 
+### D ドライブだけで行う（C に空きが無い場合）
+
+ブラウザの既定の保存先は C の「ダウンロード」なので使わず、PowerShell の `curl.exe`（Windows 10 以降に入っている）で D に直接落とす。途中で切れても同じコマンドで続きから再開できる（`-C -`）。
+
+```
+New-Item -ItemType Directory -Force D:\data | Out-Null
+cd D:\data
+curl.exe -L -C - -o e-gmd-v1.0.0.zip https://storage.googleapis.com/magentadata/datasets/e-gmd/v1.0.0/e-gmd-v1.0.0.zip
+```
+
+- 90 GB なので回線によっては数時間。PowerShell の窓は閉じずに置いておく。切れたら同じ 3 行目をもう一度実行する。
+- 終わったらサイズを確かめる: `(Get-Item D:\data\e-gmd-v1.0.0.zip).Length / 1GB`（約 90 と出ればよい）。
+
+展開も D の中で行う（Windows 10 以降の `tar` は zip を展開できる。`Expand-Archive` は大きな zip に時間がかかり C の一時領域を使うことがあるので使わない）。
+
+```
+cd D:\data
+tar -xf e-gmd-v1.0.0.zip
+dir D:\data\e-gmd-v1.0.0
+```
+
+- `e-gmd-v1.0.0.csv` と `drummer1` … が見えれば成功。見えずに `D:\data\e-gmd-v1.0.0\e-gmd-v1.0.0\...` のように一段深くなっていたら、`--egmd` にはその深い方のフォルダを渡す（CSV のあるフォルダ）。
+- 展開が終わって中身を確かめたら `Remove-Item D:\data\e-gmd-v1.0.0.zip` で 90 GB を空けてよい。
+- 7-Zip が入っていれば一部だけの展開もできる: `& "C:\Program Files\7-Zip\7z.exe" x e-gmd-v1.0.0.zip -oD:\data "e-gmd-v1.0.0\e-gmd-v1.0.0.csv" "e-gmd-v1.0.0\drummer1" "e-gmd-v1.0.0\drummer3"`。
+
+pip のキャッシュと一時フォルダも C に作られるので、CUDA 版 PyTorch（約 2.5 GB）を入れる前に D に向ける（その PowerShell の窓の中だけ有効）。
+
+```
+$env:PIP_CACHE_DIR = "D:\data\pip-cache"
+$env:TEMP = "D:\data\tmp"; $env:TMP = "D:\data\tmp"
+New-Item -ItemType Directory -Force D:\data\tmp | Out-Null
+```
+
+学習のチェックポイントと ONNX はリポジトリの `analysis\models\` に書かれる（リポジトリは D にあるので C は使わない）。
+
 ## 2. CUDA 版の PyTorch を入れる（初回だけ）
 
 リポジトリのフォルダの PowerShell で（`.venv` を有効にした状態）:
