@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from drumeval import Hit, load_hits, multi_resolution_stft_distance, transcription_scores  # noqa: E402
 from drumeval.baseline import onsets_from_part, transcribe  # noqa: E402
-from drumeval.extract import build_kit, cut_segments, cut_segments_from_parts, estimate_velocities, render_kit  # noqa: E402
+from drumeval.extract import build_kit, cut_segments, cut_segments_from_parts, estimate_velocities, render_kit, self_render_from_parts  # noqa: E402
 from drumeval.labels import M0_CLASSES, to_coarse  # noqa: E402
 from stft_distance import load_mono  # noqa: E402
 
@@ -216,6 +216,12 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             total[: px.size] += px
         row["stft_parts_sum"] = multi_resolution_stft_distance(x, _match_rms(total, x))["total"]  # 分離の整合性（0 に近いほどパートの和が元に等しい）
         write_hits_midi(ref_v, song_dir / "hits_pseudo.mid")  # DAW で確かめる用
+        ys = _match_rms(self_render_from_parts(part_audio, ref_v, x.size / sr), x)
+        row["stft_self"] = multi_resolution_stft_distance(x, ys)["total"]  # 自己再現: 打点の誤りと区間の切り方だけの損失
+        if render:
+            import soundfile as sf
+
+            sf.write(song_dir / "rerender_self.wav", (ys / (np.max(np.abs(ys)) + 1e-9) * 0.9).astype(np.float32), sr)
         row["n_isolated_parts"] = len(segs_p)
         row["layers_parts"] = ", ".join(f"{c}:{len(ls)}/{kit_p.n_samples(c)}" for c, ls in kit_p.parts.items())
         if kit_p.parts:
@@ -234,9 +240,9 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
 
 def to_markdown(rows: list[dict], title: str) -> str:
     cols = ("id", "seconds", "est_source", "truth", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
-            "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_sum")
+            "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_self", "stft_parts_sum")
     heads = ("曲ID", "秒", "推定", "正解の種類", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
-             "重ならない打（混合）", "層/音（混合）", "STFT 距離（混合）", "重ならない打（パート別）", "層/音（パート別）", "STFT 距離（パート別）", "パートの和 vs 元")
+             "重ならない打（混合）", "層/音（混合）", "STFT 距離（混合）", "重ならない打（パート別）", "層/音（パート別）", "STFT 距離（パート別）", "STFT 距離（自己再現）", "パートの和 vs 元")
     lines = [f"# {title}", "", "| " + " | ".join(heads) + " |", "|" + "---|" * len(heads)]
     def f(v):
         return "" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
@@ -257,6 +263,9 @@ def to_markdown(rows: list[dict], title: str) -> str:
         lines.append(f"- 再現との STFT 距離の平均（パート別ステムから切り出し、{len(dp)} 曲）: {np.mean(dp):.3f}")
     lines.append("- 「種類別」の打数は ki=kick、sn=snare、hi=hihat、to=tom、cy=cymbal。")
     lines.append("- STFT 距離は、比べる音の RMS を元に合わせてから測る（全体の音量差は見ない）。")
+    ds = [r["stft_self"] for r in rows if "stft_self" in r]
+    if ds:
+        lines.append(f"- 自己再現（各打をその打自身の区間で鳴らし直す）の距離の平均: {np.mean(ds):.3f}。パート別の再現との差が、層とラウンドロビンで失う分。自己再現そのものの距離は、疑似正解の誤りと区間の切り方の分。")
     lines.append("- 「パートの和 vs 元」は、パート別ステムを足し合わせた音と元のドラムの STFT 距離。分離ツールの出力がどれだけ元を保っているかの目安で、再現の距離の下限に近い。")
     lines.append("- 疑似正解は各曲のフォルダに hits_pseudo.csv と hits_pseudo.mid（GM ドラムマップ、120 BPM の絶対時刻）で書く。DAW で元の音と並べて確かめられる。")
     return "\n".join(lines) + "\n"
@@ -269,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--est-dir", default=None, help="採譜の推定 CSV（<曲ID>.csv）の置き場")
     ap.add_argument("--max-seconds", type=float, default=60.0, help="曲の先頭から使う長さ（0 で全部）")
     ap.add_argument("--model", default=None, help="ONNX の採譜モデル（指定すると基準値の代わりに使う。onnxruntime が要る）")
-    ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts）を各曲のフォルダに書く")
+    ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts / rerender_self）を各曲のフォルダに書く")
     ap.add_argument("--threshold", type=float, default=None, help="--model の打点のしきい値（既定はモデルの設定、0.5）")
     args = ap.parse_args(argv)
 

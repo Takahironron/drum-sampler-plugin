@@ -106,6 +106,36 @@ def cut_segments_from_parts(
     return segs
 
 
+def self_render_from_parts(
+    parts: dict[str, tuple[np.ndarray, int]],
+    hits: list[Hit],
+    duration: float,
+    max_len_sec: float = 1.5,
+    fade_out_sec: float = 0.01,
+) -> np.ndarray:
+    """各打を「その打自身の区間」（打点から同じ種類の次の打まで）で鳴らし直す（自己再現）。
+
+    層やラウンドロビンの量子化が無いので、元との距離は「打点の誤り・取りこぼし」と「区間の切り方」だけを映す。
+    キットでの再現との差が、層とラウンドロビンで失う分。
+    """
+    sr = next(iter(parts.values()))[1]
+    n = int(duration * sr)
+    out = np.zeros(n)
+    for cls, (x, psr) in parts.items():
+        own = sorted((h for h in hits if to_coarse(h.cls) == cls), key=lambda h: h.time)
+        for i, h in enumerate(own):
+            start = int(round(h.time * psr))
+            next_t = own[i + 1].time if i + 1 < len(own) else h.time + max_len_sec
+            end = min(start + int(min(next_t - h.time, max_len_sec) * psr), x.size, n)
+            if end - start < int(0.005 * psr):
+                continue
+            a = x[start:end].copy()
+            n_out = min(int(fade_out_sec * psr), a.size)
+            a[-n_out:] *= np.linspace(1.0, 0.0, n_out)
+            out[start:end] += a
+    return out
+
+
 def build_kit(
     segments: list[Segment],
     sr: int,
