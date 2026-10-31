@@ -107,6 +107,8 @@
 | ライセンス一覧（Phase 0） | `docs/phase0/ライセンス一覧.md` |
 | 評価用ステム一覧（Phase 0） | `docs/phase0/評価用ステム一覧.md` |
 | 手元（Windows）で評価を走らせる手順 | `docs/phase0/手元での評価の手順.md` |
+| E-GMD で採譜モデルを学習する手順 | `docs/phase0/E-GMD学習の手順.md` |
+| 評価の結果の記録 | `docs/phase0/結果/`（手元の出力は `data/results/`、コミットしない） |
 | 採点スクリプト（F 値、STFT 距離） | `analysis/`（`analysis/README.md`） |
 | JUCE の空のプラグイン | `plugin/`（`plugin/README.md`） |
 | 市販ドラム音源の機能比較（25製品×32機能、出典48件、ジャンル別キット） | `docs/research/ドラム音源_機能比較.xlsx` |

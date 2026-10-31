@@ -52,7 +52,10 @@ COARSE_CLASSES: tuple[str, ...] = ("kick", "snare", "hihat", "tom", "cymbal")
 M0_CLASSES: tuple[str, ...] = ("kick", "snare", "hihat")
 
 # General MIDI のドラムマップ（ノート番号 → 細かい種類）。載っていない番号は無視する。
+# Roland TD-17（E-GMD の録音に使われた電子ドラム）の追加ノートも含む: 22 閉ハット縁、26 開ハット縁、58 フロアタム縁。
 GM_DRUM_MAP: dict[int, str] = {
+    22: "hihat_closed",
+    26: "hihat_open",
     35: "kick",
     36: "kick",
     37: "snare_sidestick",
@@ -74,6 +77,7 @@ GM_DRUM_MAP: dict[int, str] = {
     53: "ride_bell",
     55: "splash",
     57: "crash",
+    58: "tom_floor",
     59: "ride",
 }
 

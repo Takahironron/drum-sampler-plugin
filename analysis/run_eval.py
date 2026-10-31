@@ -3,7 +3,7 @@
 
 使い方::
 
-    python run_eval.py data/stems [--out docs/phase0/結果_YYYY-MM-DD.md] [--est-dir 推定の置き場] [--max-seconds 60]
+    python run_eval.py data/stems [--out data/results/YYYY-MM-DD.md] [--est-dir 推定の置き場] [--max-seconds 60]
                        [--model analysis/models/crnn_synth_v0.onnx] [--render]
 
 各曲のフォルダ:
@@ -126,6 +126,25 @@ def write_hits_midi(hits: list[Hit], path: Path, bpm: float = 120.0) -> None:
     mid.save(str(path))
 
 
+def write_audition(kit, path: Path, max_len_sec: float = 0.6, gap_sec: float = 0.25) -> None:
+    """切り出した音を種類 → 層（弱→強）→ ラウンドロビンの順に並べた試聴用 WAV。切り出しそのものの質を耳で確かめる。"""
+    import soundfile as sf
+
+    sr = kit.sr
+    pieces = []
+    for cls in ("kick", "snare", "hihat", "tom", "cymbal"):
+        for layer in kit.parts.get(cls, []):
+            for smp in layer.samples:
+                pieces.append(smp[: int(max_len_sec * sr)])
+                pieces.append(np.zeros(int(gap_sec * sr)))
+        if cls in kit.parts:
+            pieces.append(np.zeros(int(0.6 * sr)))
+    if not pieces:
+        return
+    y = np.concatenate(pieces)
+    sf.write(path, (y / (np.max(np.abs(y)) + 1e-9) * 0.9).astype(np.float32), sr)
+
+
 def _match_rms(y: np.ndarray, x: np.ndarray) -> np.ndarray:
     """y の RMS を x に合わせる（全体の音量差で STFT 距離が膨らまないようにする）。"""
     rx = np.sqrt(np.mean(x**2)) + 1e-9
@@ -216,6 +235,8 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             total[: px.size] += px
         row["stft_parts_sum"] = multi_resolution_stft_distance(x, _match_rms(total, x))["total"]  # 分離の整合性（0 に近いほどパートの和が元に等しい）
         write_hits_midi(ref_v, song_dir / "hits_pseudo.mid")  # DAW で確かめる用
+        if render:
+            write_audition(kit_p, song_dir / "kit_parts_audition.wav")
         ys = _match_rms(self_render_from_parts(part_audio, ref_v, x.size / sr), x)
         row["stft_self"] = multi_resolution_stft_distance(x, ys)["total"]  # 自己再現: 打点の誤りと区間の切り方だけの損失
         if render:
@@ -278,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--est-dir", default=None, help="採譜の推定 CSV（<曲ID>.csv）の置き場")
     ap.add_argument("--max-seconds", type=float, default=60.0, help="曲の先頭から使う長さ（0 で全部）")
     ap.add_argument("--model", default=None, help="ONNX の採譜モデル（指定すると基準値の代わりに使う。onnxruntime が要る）")
-    ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts / rerender_self）を各曲のフォルダに書く")
+    ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts / rerender_self / kit_parts_audition）を各曲のフォルダに書く")
     ap.add_argument("--threshold", type=float, default=None, help="--model の打点のしきい値（既定はモデルの設定、0.5）")
     args = ap.parse_args(argv)
 
@@ -300,6 +321,7 @@ def main(argv: list[str] | None = None) -> int:
         rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(md, encoding="utf-8")
         print("書き出した:", args.out, file=sys.stderr)
     else:
