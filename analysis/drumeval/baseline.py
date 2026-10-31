@@ -98,3 +98,35 @@ def transcribe(x: np.ndarray, sr: int, cfg: BaselineConfig | None = None) -> lis
 
     hits.sort(key=lambda h: h.time)
     return hits
+
+
+def onsets_from_part(x: np.ndarray, sr: int, cfg: BaselineConfig | None = None, rise_db: float = 6.0) -> np.ndarray:
+    """パート別に分離された音（キックだけ、スネアだけ…）から打点の時刻（秒）を拾う。
+
+    1 パートの音は打点で立ち上がり、あとは減衰するだけなので、フレームごとのエネルギー（dB）が
+    直前（約 20 ms 前）より `rise_db` 以上大きくなった局所最大を打点とする。スペクトル・フラックスだと
+    キックのピッチの下降（低い bin が後から増える）で誤検出するため、エネルギーの増分を使う。
+    分離ツールが出すパート別ステムを「疑似的な正解」にするために使う（分離の誤りはそのまま残る）。
+    """
+    from scipy.ndimage import maximum_filter1d
+
+    cfg = cfg or BaselineConfig()
+    x = np.asarray(x, dtype=np.float64).ravel()
+    peak = np.max(np.abs(x)) + 1e-9
+    x = x / peak
+    _, t, mag = spectrogram(x, sr, cfg)
+    energy_db = 10.0 * np.log10(np.sum(mag**2, axis=0) + 1e-8)
+    look = 2  # 約 20 ms 前と比べる
+    prev = np.concatenate([np.full(look, energy_db[0]), energy_db[:-look]])
+    rise = np.maximum(energy_db - prev, 0.0)
+    frame_rate = sr / cfg.hop
+    gap = max(int(cfg.min_interval_sec * frame_rate), 1)
+    local = rise >= maximum_filter1d(rise, size=2 * gap + 1, mode="nearest")
+    floor = np.percentile(energy_db, 10) + 10.0  # 無音に近い部分の揺れは打点にしない
+    cand = np.flatnonzero(local & (rise > rise_db) & (energy_db > floor))
+    kept: list[int] = []
+    for i in cand:
+        if not kept or i - kept[-1] >= gap:
+            kept.append(int(i))
+    # 立ち上がりは増分が出たフレームの 1 つ前から始まる
+    return np.asarray([float(t[i]) - 0.5 / frame_rate for i in kept])

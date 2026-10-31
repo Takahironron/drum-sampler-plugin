@@ -32,3 +32,34 @@ def test_run_eval_on_synthetic_set(tmp_path):
     assert "| s01 |" in md and "| s02 |" in md
     assert "正解付きの曲: 1 / 2" in md
     assert "M0-1" in md
+
+
+def test_pseudo_truth_from_part_stems(tmp_path):
+    """パート別ステム（キック.wav など）だけがあるとき、疑似正解を作って F 値を出す。"""
+    import soundfile as sf
+
+    from drumeval import load_hits, transcription_scores
+    from drumeval.labels import to_coarse
+    from tests.test_pipeline import _rock_pattern
+
+    sr = 22050
+    ref = _rock_pattern(6)
+    dur = max(h.time for h in ref) + 1.2
+    song = tmp_path / "stems" / "a01"
+    song.mkdir(parents=True)
+    mix = np.zeros(int(dur * sr))
+    for cls, name in (("kick", "キック"), ("snare", "スネア"), ("hihat", "ハイハット")):
+        part = render([h for h in ref if to_coarse(h.cls) == cls], sr=sr, duration=dur)
+        sf.write(song / f"{name}.wav", part.astype(np.float32), sr)
+        mix += part
+    sf.write(song / "drum.wav", (mix / np.max(np.abs(mix)) * 0.9).astype(np.float32), sr)
+    sf.write(song / "ギター.wav", np.zeros(sr, dtype=np.float32), sr)  # 他のステムが並んでいても drum.wav を選ぶ
+
+    script = Path(__file__).resolve().parents[1] / "run_eval.py"
+    r = subprocess.run([sys.executable, str(script), str(tmp_path / "stems")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "疑似（パート別ステム）" in r.stdout
+    pseudo = load_hits(song / "hits_pseudo.csv")
+    s = transcription_scores(ref, pseudo)
+    for c in ("kick", "snare", "hihat"):
+        assert s[c].f_measure >= 0.95, (c, s[c])

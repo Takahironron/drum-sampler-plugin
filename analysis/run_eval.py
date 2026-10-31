@@ -8,6 +8,9 @@
 各曲のフォルダ:
     drums.wav | .flac    分離済みのドラムのステム（必須。フォルダ内の音声ファイルが 1 つなら名前は問わない）
     hits.csv | hits.mid  打点の正解（あれば M0-1 を出す）
+    キック.wav スネア.wav ハイハット.wav （シンバル.wav）
+                         分離ツールが出すパート別ステム。正解が無いときは、これの打点検出を「疑似正解」にして F 値の目安を出す
+                         （song フォルダに hits_pseudo.csv を書く）
 フォルダを作らず `data/stems/a01.wav` のように音声ファイルを直接並べてもよい（曲ID はファイル名）。
 
 採譜の推定は、`--est-dir` に `<曲ID>.csv` があればそれを使い、無ければ基準値（`baseline_transcribe`）で作る。
@@ -25,8 +28,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from drumeval import load_hits, multi_resolution_stft_distance, transcription_scores  # noqa: E402
-from drumeval.baseline import transcribe  # noqa: E402
+from drumeval import Hit, load_hits, multi_resolution_stft_distance, transcription_scores  # noqa: E402
+from drumeval.baseline import onsets_from_part, transcribe  # noqa: E402
 from drumeval.extract import build_kit, cut_segments, estimate_velocities, render_kit  # noqa: E402
 from drumeval.labels import M0_CLASSES  # noqa: E402
 from stft_distance import load_mono  # noqa: E402
@@ -37,11 +40,51 @@ AUDIO_EXT = (".wav", ".flac", ".aif", ".aiff", ".ogg")
 
 def find_stem(song_dir: Path) -> Path | None:
     """`drums.wav`／`drums.flac` を優先し、無ければフォルダ内の音声ファイルが 1 つだけならそれを使う。"""
-    for name in ("drums.wav", "drums.flac"):
+    for name in ("drums.wav", "drums.flac", "drum.wav", "drum.flac", "ドラム.wav"):
         if (song_dir / name).exists():
             return song_dir / name
+    # SpectraLayers の書き出し「<曲名>_ドラム.wav」
+    sl = [p for p in song_dir.iterdir() if p.suffix.lower() in AUDIO_EXT and p.stem.endswith("_ドラム")]
+    if len(sl) == 1:
+        return sl[0]
     audio = [p for p in song_dir.iterdir() if p.suffix.lower() in AUDIO_EXT and not p.name.startswith("rerender")]
     return audio[0] if len(audio) == 1 else None
+
+
+# パート別に分離されたステムの名前（SpectraLayers の日本語名と英語名）→ 種類
+PART_NAMES = {
+    "キック": "kick", "kick": "kick", "kicks": "kick",
+    "スネア": "snare", "snare": "snare",
+    "ハイハット": "hihat", "hihat": "hihat", "hi-hat": "hihat", "hats": "hihat",
+    "シンバル": "cymbal", "cymbal": "cymbal", "cymbals": "cymbal",
+    "タム": "tom", "tom": "tom", "toms": "tom",
+}
+
+
+def find_part_stems(song_dir: Path) -> dict[str, Path]:
+    """パート別ステム（キック.wav など）があれば 種類 → ファイル を返す。"""
+    out: dict[str, Path] = {}
+    for p in song_dir.iterdir():
+        if p.suffix.lower() not in AUDIO_EXT:
+            continue
+        key = p.stem.lower()
+        for name, cls in PART_NAMES.items():
+            if key == name.lower() or key.endswith("_" + name.lower()):
+                out[cls] = p
+    return out
+
+
+def pseudo_truth_from_parts(parts: dict[str, Path], max_seconds: float, sr_target: int | None) -> list[Hit]:
+    """パート別ステムの打点検出を「疑似的な正解」にする。分離の誤りはそのまま残るので目安。"""
+    hits: list[Hit] = []
+    for cls, path in parts.items():
+        x, sr = load_mono(str(path), sr_target)
+        if max_seconds and x.size > max_seconds * sr:
+            x = x[: int(max_seconds * sr)]
+        for t in onsets_from_part(x, sr):
+            hits.append(Hit(float(t), cls, None))
+    hits.sort(key=lambda h: h.time)
+    return hits
 
 
 def list_songs(stems_dir: Path) -> list[tuple[str, Path, Path]]:
@@ -73,12 +116,23 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
     est = [h for h in est if h.time < x.size / sr]
 
     truth_path = next((p for p in (song_dir / "hits.csv", song_dir / "hits.mid", song_dir / "hits.midi") if p.exists()), None)
+    parts = find_part_stems(song_dir)
+    ref: list[Hit] | None = None
     if truth_path:
         ref = [h for h in load_hits(truth_path) if h.time < x.size / sr]
+        row["truth"] = "正解"
+    elif all(c in parts for c in M0_CLASSES):
+        ref = pseudo_truth_from_parts({c: parts[c] for c in M0_CLASSES}, x.size / sr, sr)
+        row["truth"] = "疑似（パート別ステム）"
+        from drumeval import save_hits_csv
+
+        save_hits_csv(ref, song_dir / "hits_pseudo.csv")
+    if ref is not None:
         scores = transcription_scores(ref, est)
         for c in M0_CLASSES:
             row[f"f_{c}"] = scores[c].f_measure
         row["m0_1"] = float(np.mean([scores[c].f_measure for c in M0_CLASSES]))
+    row["parts"] = ",".join(sorted(parts)) if parts else ""
 
     hits = estimate_velocities(est, None, x, sr) if any(h.velocity is None for h in est) else est
     segs = cut_segments(x, sr, hits)
@@ -93,15 +147,18 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
 
 
 def to_markdown(rows: list[dict], title: str) -> str:
-    lines = [f"# {title}", "", "| 曲ID | 秒 | 推定 | F kick | F snare | F hihat | M0-1 | 打 | 重ならない打 | 層/音（種類ごと） | STFT 距離（元 vs 再現） |", "|---|---|---|---|---|---|---|---|---|---|---|"]
+    lines = [f"# {title}", "", "| 曲ID | 秒 | 推定 | 正解の種類 | F kick | F snare | F hihat | M0-1 | 打 | 重ならない打 | 層/音（種類ごと） | STFT 距離（元 vs 再現） | パート別ステム |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     def f(v):
         return "" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
     for r in rows:
-        lines.append("| " + " | ".join(f(r.get(k)) for k in ("id", "seconds", "est_source", "f_kick", "f_snare", "f_hihat", "m0_1", "n_hits", "n_isolated", "layers", "stft_rerender")) + " |")
-    m0 = [r["m0_1"] for r in rows if "m0_1" in r]
-    lines += ["", f"- 正解付きの曲: {len(m0)} / {len(rows)}"]
-    if m0:
-        lines.append(f"- M0-1（kick/snare/hihat の F の平均）の平均: {np.mean(m0):.3f}（目安 0.85）")
+        lines.append("| " + " | ".join(f(r.get(k)) for k in ("id", "seconds", "est_source", "truth", "f_kick", "f_snare", "f_hihat", "m0_1", "n_hits", "n_isolated", "layers", "stft_rerender", "parts")) + " |")
+    m0_true = [r["m0_1"] for r in rows if r.get("truth") == "正解"]
+    m0_pseudo = [r["m0_1"] for r in rows if r.get("truth", "").startswith("疑似")]
+    lines += ["", f"- 正解付きの曲: {len(m0_true)} / {len(rows)}、疑似正解（パート別ステムの打点）付きの曲: {len(m0_pseudo)} / {len(rows)}"]
+    if m0_true:
+        lines.append(f"- M0-1（kick/snare/hihat の F の平均）の平均: {np.mean(m0_true):.3f}（目安 0.85）")
+    if m0_pseudo:
+        lines.append(f"- 疑似正解に対する M0-1 の平均: {np.mean(m0_pseudo):.3f}（分離ツールのパート分けの誤りを含むので目安。M0 の判定には使わない）")
     d = [r["stft_rerender"] for r in rows if "stft_rerender" in r]
     if d:
         lines.append(f"- 再現との STFT 距離の平均: {np.mean(d):.3f}（M0-2 の聞き比べの参考。小さいほど近い）")
