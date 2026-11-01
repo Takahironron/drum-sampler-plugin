@@ -82,7 +82,8 @@
 | a01 の時間軸の診断 | 済 | 悪い区間は 2 種類: 打点で説明できない音（タンバリン、残響）と、密な区間の代表音不足。「その他のパーカッション」「残差の層」を Phase 2 の候補に |
 | E-GMD での学習の道具 | 済（偽データで確認） | `analysis/train_transcriber.py --egmd`、`eval_egmd.py`、`drumeval/egmd.py`（にじみの増強つき）。手順は `docs/phase0/E-GMD学習の手順.md`。PC（RTX 3060 6 GB）で学習する |
 | E-GMD で学習した CRNN v1 | 済 | E-GMD test で M0-1 0.70（kick 0.83、snare 0.74、hihat 0.54、cymbal 0.21）。区分 A の疑似正解では 0.51 で v0 と差なし。a07 の電子キックが検出できない（`docs/phase0/結果/2026-11-04_EGMD_v1.md`） |
-| CRNN v2 の準備 | 済（学習は Takahiro の PC で） | 増強の調整、合成音 15% の混ぜ込み、種類別の重み、GRU 128、12 エポック |
+| CRNN v2 | 済 | E-GMD test で M0-1 0.74（hihat 0.61、cymbal 0.47）、区分 A 0.566（最良）。a07 の電子キックが直った。残る弱点はハイハット（`docs/phase0/結果/2026-11-05_EGMD_v2.md`） |
+| CRNN v3 の準備 | 済（学習は Takahiro の PC で） | 96 メル帯域・縮小 1 回、種類別のしきい値、検証 80 本、16 エポック |
 | 評価用ステムの収集（区分 B） | 未 | MIDI 曲 → VST で書き出し → SpectraLayers |
 | 採譜の試作（公開モデルの基準値、E-GMD での学習） | 未 | 評価用ステムと E-GMD の入手が要る |
 | 切り出しと層（実ステムでの聞き比べ） | 未 | 評価用ステムが要る |

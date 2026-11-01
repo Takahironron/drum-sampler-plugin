@@ -75,16 +75,18 @@ def frame_targets(hits: list[Hit], n_frames: int, cfg: FeatureConfig, classes: t
     return y
 
 
-def pick_hits(prob: np.ndarray, cfg: FeatureConfig, classes: tuple[str, ...], threshold: float = 0.5, min_gap_sec: float = 0.05) -> list[Hit]:
-    """[frames, classes] の確率から打点を拾う（しきい値 ＋ 局所最大 ＋ 最小間隔）。"""
+def pick_hits(prob: np.ndarray, cfg: FeatureConfig, classes: tuple[str, ...], threshold: float | dict[str, float] = 0.5,
+              min_gap_sec: float = 0.05) -> list[Hit]:
+    """[frames, classes] の確率から打点を拾う（しきい値 ＋ 局所最大 ＋ 最小間隔）。`threshold` は種類ごとの辞書でもよい。"""
     from scipy.ndimage import maximum_filter1d
 
     hits: list[Hit] = []
     gap = max(int(min_gap_sec * cfg.frame_rate), 1)
     for ci, c in enumerate(classes):
+        thr = threshold.get(c, 0.5) if isinstance(threshold, dict) else threshold
         p = prob[:, ci]
         local = p >= maximum_filter1d(p, size=2 * gap + 1, mode="nearest")
-        cand = np.flatnonzero(local & (p > threshold))
+        cand = np.flatnonzero(local & (p > thr))
         last = -10**9
         for i in cand:
             if i - last >= gap:

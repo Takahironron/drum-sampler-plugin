@@ -59,11 +59,12 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 ## 3. 学習
 
 ```
-python analysis\train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\stems --out analysis\models\crnn_egmd_v2.onnx
+python analysis\train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\stems --out analysis\models\crnn_egmd_v3.onnx
 ```
 
-- 既定（v2 から）: 学習トラック 4,000 本（乱数で選ぶ。キットが散る）、1 本から 8 秒の区間を 2 つ、バッチ 8、GRU 128、OneCycle、12 エポック、合成音の混ぜ込み 15%、ワーカー 4。1 エポック 1,000 ステップ。v1（GRU 96、8 エポック、混ぜ込み無し）は E-GMD test で M0-1 0.70 だった（`結果/2026-11-04_EGMD_v1.md`）。
-- エポックごとの検証の結果は `analysis\models\crnn_egmd_v2.log.txt` に残る（これを貼ればよい）。
+- 既定（v3 から）: 学習トラック 4,000 本（乱数で選ぶ。キットが散る）、1 本から 8 秒の区間を 2 つ、バッチ 8、96 メル帯域・周波数方向の縮小 1 回、GRU 128、OneCycle、16 エポック、合成音の混ぜ込み 15%、検証 80 本、ワーカー 4。1 エポック 1,000 ステップ（約 12 分）。種類ごとのしきい値を検証で選んで ONNX の設定に保存する。
+- これまで: v1（64 メル、GRU 96、8 エポック、混ぜ込み無し）E-GMD test M0-1 0.70、v2（64 メル、GRU 128、12 エポック、混ぜ込み 15%）0.74（`結果/` を見る）。
+- エポックごとの検証の結果は `analysis\models\crnn_egmd_v3.log.txt` に残る（これを貼ればよい）。
 - `--bleed-dir data\stems` は、区分 A のドラム以外のステム（ギター・ベース・ピアノ・ボーカル・その他）を「分離の残り」として混ぜる増強。ドラム系の名前のファイルは自動で除く。**CD 曲のステムを混ぜたモデルは評価用に限る**（製品のモデルは権利の明確な音だけで作る。R3）。
 - 毎エポック、validation 分割 40 本 × 30 秒で種類ごとの F 値を出し、しきい値 0.3／0.4／0.5 のうち M0-1 が最も高いものを記録する。最良のエポックの ONNX が `--out` に残る（チェックポイントは `.pt`）。
 - 時間の目安: 特徴量の計算が CPU なので、1 エポック 5〜15 分程度（ワーカー 2）。`--workers 4` で速くなることがある。DataLoader で止まるときは `--workers 0`。
@@ -75,7 +76,7 @@ python analysis\train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir dat
 E-GMD の test 分割（正解は MIDI なので本当の F 値。ただし電子ドラムの音に対して）:
 
 ```
-python analysis\eval_egmd.py analysis\models\crnn_egmd_v2.onnx D:\data\e-gmd-v1.0.0 --split test --max-tracks 60 --by-kit
+python analysis\eval_egmd.py analysis\models\crnn_egmd_v3.onnx D:\data\e-gmd-v1.0.0 --split test --max-tracks 60 --by-kit
 ```
 
 `--by-kit` でキットごとの M0-1 も出る（電子系のキットが弱いかを見る）。
@@ -83,7 +84,7 @@ python analysis\eval_egmd.py analysis\models\crnn_egmd_v2.onnx D:\data\e-gmd-v1.
 区分 A の実ステム（疑似正解に対する目安）:
 
 ```
-python analysis\run_eval.py data\stems --model analysis\models\crnn_egmd_v2.onnx --render --out data\results\YYYY-MM-DD_egmd_v2.md
+python analysis\run_eval.py data\stems --model analysis\models\crnn_egmd_v3.onnx --render --out data\results\YYYY-MM-DD_egmd_v3.md
 ```
 
 出てきた数字（E-GMD test の M0-1、区分 A の M0-1）を貼ってもらえれば、`docs/phase0/結果/` に記録する。M0-1 の目安は 0.85。

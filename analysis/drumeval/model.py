@@ -11,15 +11,16 @@ import torch.nn as nn
 
 
 class DrumCRNN(nn.Module):
-    def __init__(self, n_mels: int = 64, n_classes: int = 3, hidden: int = 48):
+    """`pools`: 周波数方向に半分にする回数（1 か 2）。ハイハットとシンバルの帯域を潰しすぎないなら 1。"""
+
+    def __init__(self, n_mels: int = 64, n_classes: int = 3, hidden: int = 48, pools: int = 2):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(1, 16, 3, padding=1), nn.BatchNorm2d(16), nn.ReLU(),
-            nn.MaxPool2d((1, 2)),  # 周波数方向だけ半分に
-            nn.Conv2d(16, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(),
-            nn.MaxPool2d((1, 2)),
-        )
-        self.rnn = nn.GRU(32 * (n_mels // 4), hidden, batch_first=True, bidirectional=True)
+        layers: list[nn.Module] = [nn.Conv2d(1, 16, 3, padding=1), nn.BatchNorm2d(16), nn.ReLU()]
+        if pools >= 2:
+            layers.append(nn.MaxPool2d((1, 2)))  # 周波数方向だけ半分に
+        layers += [nn.Conv2d(16, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d((1, 2))]
+        self.conv = nn.Sequential(*layers)
+        self.rnn = nn.GRU(32 * (n_mels // (2 ** max(pools, 1))), hidden, batch_first=True, bidirectional=True)
         self.out = nn.Linear(2 * hidden, n_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

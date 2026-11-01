@@ -16,7 +16,8 @@ E-GMD（実データ。CC BY 4.0。GPU があれば自動で使う）::
 - 出力: `<out>.onnx` と、特徴量の設定・種類・しきい値を書いた `<out>.json`。チェックポイント `<out>.pt` も毎エポック書く。
   エポックごとの検証の結果は `<out>.log.txt` に残る。
 - 検証: E-GMD の validation 分割から `--val-tracks` 本（先頭 `--val-seconds` 秒）で種類ごとの F 値を出し、しきい値 0.3／0.4／0.5 のうち
-  M0-1（kick/snare/hihat の F の平均）が最も高いものを ONNX の設定に書く。
+  種類ごとに F が最も高いものを選んで ONNX の設定（`thresholds`）に書く。M0-1（kick/snare/hihat の F の平均）が最良のエポックを残す。
+- 特徴量と形: E-GMD では 96 メル帯域、周波数方向の縮小 1 回（ハイハットとシンバルの帯域を潰さない）。
 """
 
 from __future__ import annotations
@@ -70,6 +71,24 @@ def make_batch(rng: np.random.Generator, cfg: FeatureConfig, classes: tuple[str,
 # 評価と書き出し（合成・E-GMD 共通）
 # ---------------------------------------------------------------------------
 
+def best_thresholds(scores: dict, classes: tuple[str, ...]) -> dict[str, float]:
+    """しきい値ごとの結果から、種類ごとに F が最大のしきい値を選ぶ。"""
+    return {c: float(max(scores, key=lambda k: scores[k][c])) for c in classes}
+
+
+def score_with_thresholds(predict, examples, cfg: FeatureConfig, classes: tuple[str, ...], thr: dict[str, float]) -> dict:
+    """種類別のしきい値で採点する。"""
+    per_class = {c: [] for c in classes}
+    for feat, hits in examples:
+        est = pick_hits(predict(feat), cfg, classes, thr)
+        s = transcription_scores(hits, est, classes)
+        for c in classes:
+            per_class[c].append(s[c].f_measure)
+    f = {c: float(np.mean(v)) for c, v in per_class.items()}
+    f["m0_1"] = float(np.mean([f[c] for c in M0_CLASSES if c in f]))
+    return f
+
+
 def score_examples(predict, examples: list[tuple[np.ndarray, list[Hit]]], cfg: FeatureConfig, classes: tuple[str, ...],
                    thresholds: tuple[float, ...] = THRESHOLDS) -> dict:
     """examples: [(対数メル, 正解の打点)]。しきい値ごとに種類別の F と M0-1 を返す。"""
@@ -95,7 +114,7 @@ def format_scores(scores: dict, classes: tuple[str, ...]) -> str:
     return "\n".join(lines)
 
 
-def export_onnx(model, cfg: FeatureConfig, classes: tuple[str, ...], out: Path, threshold: float, meta_extra: dict) -> Path:
+def export_onnx(model, cfg: FeatureConfig, classes: tuple[str, ...], out: Path, threshold: float | dict[str, float], meta_extra: dict) -> Path:
     import onnxruntime as ort
     import torch
 
@@ -106,7 +125,12 @@ def export_onnx(model, cfg: FeatureConfig, classes: tuple[str, ...], out: Path, 
     torch.onnx.export(model_cpu, dummy, str(out), input_names=["log_mel"], output_names=["prob"],
                       dynamic_axes={"log_mel": {0: "batch", 1: "frames"}, "prob": {0: "batch", 1: "frames"}},
                       opset_version=17, dynamo=False)
-    meta = {"features": cfg.__dict__, "classes": list(classes), "threshold": threshold} | meta_extra
+    meta = {"features": cfg.__dict__, "classes": list(classes)} | meta_extra
+    if isinstance(threshold, dict):
+        meta["thresholds"] = threshold
+        meta["threshold"] = float(np.mean(list(threshold.values())))
+    else:
+        meta["threshold"] = threshold
     out.with_suffix(".json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     # PyTorch と ONNX Runtime の出力が同じことを確かめる
     feat = np.random.default_rng(0).standard_normal((1, 300, cfg.n_mels)).astype(np.float32)
@@ -139,9 +163,9 @@ def train_synthetic(args) -> int:
     classes = M0_CLASSES
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
-    cfg = FeatureConfig()
+    cfg = FeatureConfig(n_mels=64)
     device = pick_device(args.device)
-    model = DrumCRNN(cfg.n_mels, len(classes), hidden=args.hidden).to(device)
+    model = DrumCRNN(cfg.n_mels, len(classes), hidden=args.hidden, pools=2).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=2e-3)
     pos_weight = torch.tensor([8.0] * len(classes), device=device)
 
@@ -196,7 +220,7 @@ def train_egmd(args) -> int:
     from drumeval.model import DrumCRNN
 
     classes = CLASSES5
-    cfg = FeatureConfig()
+    cfg = FeatureConfig(n_mels=args.n_mels)
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     device = pick_device(args.device)
@@ -220,7 +244,7 @@ def train_egmd(args) -> int:
                     do_augment=not args.no_augment, classes=classes, seed=args.seed, synthetic_ratio=args.synthetic_ratio)
     dl = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=args.workers, drop_last=True,
                     persistent_workers=args.workers > 0)
-    model = DrumCRNN(cfg.n_mels, len(classes), hidden=args.hidden).to(device)
+    model = DrumCRNN(cfg.n_mels, len(classes), hidden=args.hidden, pools=args.pools).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     total_steps = max(len(dl) * args.epochs, 1)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
@@ -238,7 +262,7 @@ def train_egmd(args) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     log_path = out.with_suffix(".log.txt")
     log_path.write_text(f"E-GMD: 学習 {len(train)} 本（キット {len(kits)} 種）、検証 {len(val)} 本、にじみ用の音声 {len(bleed)} 本、"
-                        f"合成の混ぜ込み {args.synthetic_ratio:g}、hidden {args.hidden}、batch {args.batch}、epochs {args.epochs}、lr {args.lr}\n", encoding="utf-8")
+                        f"合成の混ぜ込み {args.synthetic_ratio:g}、hidden {args.hidden}、n_mels {args.n_mels}、pools {args.pools}、batch {args.batch}、epochs {args.epochs}、lr {args.lr}\n", encoding="utf-8")
 
     def log(msg: str) -> None:
         print(msg, flush=True)
@@ -268,15 +292,17 @@ def train_egmd(args) -> int:
             if step % 50 == 0:
                 print(f"  epoch {epoch} step {step}/{total_steps}  loss {np.mean(losses[-50:]):.4f}  ({time.time() - t_start:.0f}s)", flush=True)
         scores = score_examples(predict, val_examples, cfg, classes)
-        thr = max(scores, key=lambda k: scores[k]["m0_1"])
-        log(f"epoch {epoch}  loss {np.mean(losses):.4f}  検証（{len(val_examples)} 本 × {args.val_seconds:.0f} 秒）  ({time.time() - t_start:.0f}s):\n{format_scores(scores, classes)}")
-        torch.save({"state_dict": model.state_dict(), "hidden": args.hidden, "classes": classes, "features": cfg.__dict__, "epoch": epoch},
+        thr_by_class = best_thresholds(scores, classes)
+        f_best = score_with_thresholds(predict, val_examples, cfg, classes, thr_by_class)
+        log(f"epoch {epoch}  loss {np.mean(losses):.4f}  検証（{len(val_examples)} 本 × {args.val_seconds:.0f} 秒）  ({time.time() - t_start:.0f}s):\n{format_scores(scores, classes)}\n"
+            f"  種類別のしきい値 {thr_by_class}: " + " ".join(f"{c} {f_best[c]:.3f}" for c in classes) + f"  M0-1 {f_best['m0_1']:.3f}")
+        torch.save({"state_dict": model.state_dict(), "hidden": args.hidden, "pools": args.pools, "classes": classes, "features": cfg.__dict__, "epoch": epoch},
                    out.with_suffix(".pt"))
-        if scores[thr]["m0_1"] > best_m0:
-            best_m0, best_thr = scores[thr]["m0_1"], thr
+        if f_best["m0_1"] > best_m0:
+            best_m0, best_thr = f_best["m0_1"], thr_by_class
             export_onnx(model, cfg, classes, out, best_thr,
                         {"trained_on": "E-GMD (CC BY 4.0)" + (f" + synthetic {args.synthetic_ratio:g}" if args.synthetic_ratio else ""),
-                         "epochs": epoch, "train_tracks": len(train), "kits": len(kits), "hidden": args.hidden,
+                         "epochs": epoch, "train_tracks": len(train), "kits": len(kits), "hidden": args.hidden, "pools": args.pools,
                          "bleed_files": len(bleed), "val_m0_1": best_m0, "val_scores": {str(k): v for k, v in scores.items()}, "seed": args.seed})
             model.to(device)
             log(f"  → 検証の M0-1 が最良（{best_m0:.3f}、しきい値 {best_thr}）なので ONNX を更新")
@@ -298,12 +324,14 @@ def main(argv: list[str] | None = None) -> int:
     # E-GMD
     ap.add_argument("--egmd", default=None, help="E-GMD のフォルダ（e-gmd-v1.0.0.csv があるところ）。指定すると E-GMD で学習する")
     ap.add_argument("--bleed-dir", default=None, help="にじみ用にドラム以外のステムを混ぜるフォルダ（任意）")
-    ap.add_argument("--epochs", type=int, default=12)
+    ap.add_argument("--epochs", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--max-tracks", type=int, default=4000, help="学習に使うトラック数の上限（0 で全部）")
     ap.add_argument("--chunks-per-track", type=int, default=2)
     ap.add_argument("--workers", type=int, default=4, help="DataLoader のワーカー数（Windows で問題があれば 0）")
-    ap.add_argument("--val-tracks", type=int, default=40)
+    ap.add_argument("--val-tracks", type=int, default=80)
+    ap.add_argument("--n-mels", type=int, default=96, help="メル帯域の数（E-GMD の既定 96。合成は 64）")
+    ap.add_argument("--pools", type=int, default=1, choices=(1, 2), help="周波数方向に半分にする回数（E-GMD の既定 1）")
     ap.add_argument("--val-seconds", type=float, default=30.0)
     ap.add_argument("--no-augment", action="store_true")
     ap.add_argument("--synthetic-ratio", type=float, default=0.15, help="E-GMD の区間の代わりに合成音（電子系のキックを含む）を返す割合（E-GMD のとき）")

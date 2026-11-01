@@ -218,7 +218,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
         from drumeval.infer import transcribe_onnx
 
         est = transcribe_onnx(x, sr, model, threshold)
-        row["est_source"] = Path(model).stem + ("" if threshold is None else f"@{threshold:g}")
+        row["est_source"] = Path(model).stem + ("" if threshold is None else f"@{threshold:g}")  # 既定は json の種類別しきい値
     else:
         est = transcribe(x, sr)
         row["est_source"] = "baseline"

@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.check_offset:
             offsets.append(estimate_offset(x, cfg.sr, hits, cfg))
 
-    print(f"E-GMD {args.split} 分割 {len(tracks)} 本 × {args.seconds:.0f} 秒、しきい値 {thr}")
+    print(f"E-GMD {args.split} 分割 {len(tracks)} 本 × {args.seconds:.0f} 秒、しきい値 {thr}（特徴量: {cfg.n_mels} メル）")
     print(f"{'種類':8s} {'P':>6s} {'R':>6s} {'F':>6s}")
     for c in classes:
         print(f"{c:8s} {np.mean(per_class[c]['p']):6.3f} {np.mean(per_class[c]['r']):6.3f} {np.mean(per_class[c]['f']):6.3f}")

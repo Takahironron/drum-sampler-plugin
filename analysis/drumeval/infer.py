@@ -11,10 +11,12 @@ from .features import FeatureConfig, log_mel, pick_hits
 from .labels import Hit
 
 
-def load_meta(onnx_path: str | Path) -> tuple[FeatureConfig, tuple[str, ...], float]:
+def load_meta(onnx_path: str | Path) -> tuple[FeatureConfig, tuple[str, ...], float | dict[str, float]]:
+    """返り値のしきい値は、json に `thresholds`（種類別）があればその辞書、無ければ `threshold`（1 つ）。"""
     meta = json.loads(Path(onnx_path).with_suffix(".json").read_text(encoding="utf-8"))
     cfg = FeatureConfig(**meta["features"])
-    return cfg, tuple(meta["classes"]), float(meta.get("threshold", 0.5))
+    thr = meta.get("thresholds") or float(meta.get("threshold", 0.5))
+    return cfg, tuple(meta["classes"]), thr
 
 
 def transcribe_onnx(x: np.ndarray, sr: int, onnx_path: str | Path, threshold: float | None = None) -> list[Hit]:
