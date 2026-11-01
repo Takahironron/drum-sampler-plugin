@@ -120,3 +120,20 @@ def test_feature_kit_with_gain_and_choke_is_closer_than_3x3():
     back = load_kit(d)
     assert back.feat_norm.keys() == kit_c.feat_norm.keys()
     assert back.pick_nearest("kick", feats[0]) is not None
+
+
+def test_onset_lag_handles_short_samples():
+    from drumeval.extract import _onset_lag
+
+    sr = 44100
+    rng = np.random.default_rng(0)
+    target = rng.standard_normal(2000)
+    # 短い音（40 ms 未満）でも落ちない
+    for n in (5, 16, 100, 587, 1500):
+        lag = _onset_lag(target, rng.standard_normal(n), sr)
+        assert isinstance(lag, int)
+    # ずらした音は元の位置に戻る
+    pulse = np.zeros(4000)
+    pulse[1000:1100] = np.hanning(100)
+    shifted = np.roll(pulse, 200)  # 200 サンプル遅れ
+    assert _onset_lag(pulse, shifted, sr) == -200

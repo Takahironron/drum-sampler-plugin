@@ -326,7 +326,9 @@ def _onset_lag(target: np.ndarray, sample: np.ndarray, sr: int, max_lag_sec: flo
     b = np.abs(sample[:n]).astype(np.float64)
     a -= a.mean()
     b -= b.mean()
-    max_lag = int(max_lag_sec * sr)
+    max_lag = min(int(max_lag_sec * sr), n // 2)  # 短い音では、ずらす幅を比較する長さの半分までに抑える
+    if max_lag <= 0:
+        return 0
     best, best_lag = -np.inf, 0
     for lag in range(-max_lag, max_lag + 1):
         if lag >= 0:
