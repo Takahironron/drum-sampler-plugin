@@ -129,6 +129,27 @@ def write_hits_midi(hits: list[Hit], path: Path, bpm: float = 120.0) -> None:
     mid.save(str(path))
 
 
+def timeline(x: np.ndarray, renders: dict[str, np.ndarray], hits: list[Hit], sr: int, win_sec: float = 2.0, hop_sec: float = 1.0) -> list[dict]:
+    """2 秒の窓ごとの距離（各再現 vs 元）と、窓の中の種類別の打数。どの区間が悪いかを見る。"""
+    from collections import Counter
+
+    n_win = max(int((x.size / sr - win_sec) / hop_sec) + 1, 1)
+    rows = []
+    for k in range(n_win):
+        t0 = k * hop_sec
+        a, b = int(t0 * sr), int((t0 + win_sec) * sr)
+        if b - a < int(0.5 * sr):
+            break
+        row = {"start": t0, "end": t0 + win_sec}
+        for name, y in renders.items():
+            row[name] = multi_resolution_stft_distance(x[a:b], y[a:b])["total"]
+        c = Counter(to_coarse(h.cls) for h in hits if t0 <= h.time < t0 + win_sec)
+        for cls in ("kick", "snare", "hihat", "tom", "cymbal"):
+            row[cls] = c.get(cls, 0)
+        rows.append(row)
+    return rows
+
+
 def write_audition(kit, path: Path, max_len_sec: float = 0.6, gap_sec: float = 0.25) -> None:
     """切り出した音を種類 → 層（弱→強）→ ラウンドロビンの順に並べた試聴用 WAV。切り出しそのものの質を耳で確かめる。"""
     import soundfile as sf
@@ -267,6 +288,18 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
                 row[f"stft_parts_features_{name}"] = multi_resolution_stft_distance(x, y_)["total"]
             row["stft_parts_features"] = row[f"stft_parts_features_{choke}"]
             yc = renders_c[choke]
+            # 時間軸の診断: どの区間で C が悪いか、そこで自己再現も悪いか（打点側の問題か、代表音の不足か）
+            tl = timeline(x, {"self": ys, "C": yc}, ref_v, sr)
+            worst = sorted(tl, key=lambda r: -r["C"])[:5]
+            row["worst_windows"] = "; ".join(
+                f"{r['start']:.0f}-{r['end']:.0f}s C {r['C']:.2f} 自己 {r['self']:.2f} (ki{r['kick']} sn{r['snare']} hi{r['hihat']} cy{r['cymbal']})" for r in worst)
+            if render:
+                import csv as _csv
+
+                with open(song_dir / "timeline.csv", "w", newline="", encoding="utf-8") as f:
+                    w = _csv.DictWriter(f, fieldnames=list(tl[0].keys()))
+                    w.writeheader()
+                    w.writerows(tl)
             if render:
                 import soundfile as sf
 
@@ -312,6 +345,12 @@ def to_markdown(rows: list[dict], title: str) -> str:
                      f"C でチョークをハイハットだけ {np.mean([r['stft_parts_features_hihat'] for r in rows if 'stft_parts_features_hihat' in r]):.3f}、"
                      f"C でチョーク無し {np.mean([r['stft_parts_features_none'] for r in rows if 'stft_parts_features_none' in r]):.3f}")
     lines.append("- 「種類別」の打数は ki=kick、sn=snare、hi=hihat、to=tom、cy=cymbal。")
+    worst = [(r["id"], r["worst_windows"]) for r in rows if r.get("worst_windows")]
+    if worst:
+        lines += ["", "## 曲ごとの悪い区間（方式 C の距離が大きい 2 秒窓、上位 5。自己再現も悪ければ打点側、自己再現が良ければ代表音の不足）", ""]
+        for sid, w in worst:
+            lines.append(f"- {sid}: {w}")
+        lines.append("- `--render` を付けると各曲のフォルダに `timeline.csv`（1 秒ごとの距離と打数）も書く。")
     lines.append("- STFT 距離は、比べる音の RMS を元に合わせてから測る（全体の音量差は見ない）。")
     ds = [r["stft_self"] for r in rows if "stft_self" in r]
     if ds:
@@ -330,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--model", default=None, help="ONNX の採譜モデル（指定すると基準値の代わりに使う。onnxruntime が要る）")
     ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts_3x3 / rerender_parts / rerender_self / kit_parts_audition）を各曲のフォルダに書く")
     ap.add_argument("--threshold", type=float, default=None, help="--model の打点のしきい値（既定はモデルの設定、0.5）")
-    ap.add_argument("--kit-size", type=int, default=12, help="方式 C で種類ごとに残す代表の音の数")
+    ap.add_argument("--kit-size", type=int, default=24, help="方式 C で種類ごとに残す代表の音の数（既定 24）")
     ap.add_argument("--choke", choices=sorted(CHOKE_POLICIES), default="all", help="rerender_parts.wav に使うチョークの方針（表には 3 通りとも出る）")
     ap.add_argument("--only", default=None, help="曲 ID をコンマ区切りで指定すると、その曲だけ評価する（例: a01,a07）")
     args = ap.parse_args(argv)
