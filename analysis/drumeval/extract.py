@@ -57,9 +57,20 @@ class Kit:
                 out.append((smp, peak, feat))
         return out
 
-    def pick_nearest(self, cls: str, feature: np.ndarray) -> tuple[np.ndarray, float] | None:
-        """特徴の近い音を返す（音, ピーク dB）。特徴の無いキットなら None。"""
-        cands = [(smp, peak, f) for smp, peak, f in self.all_samples(cls) if f is not None]
+    def pick_nearest(self, cls: str, feature: np.ndarray, exclude_time: float | None = None) -> tuple[np.ndarray, float] | None:
+        """特徴の近い音を返す（音, ピーク dB）。特徴の無いキットなら None。
+
+        `exclude_time` を渡すと、その時刻（±5 ms）に由来する音を候補から外す（自分自身を除く上限の測定用）。
+        """
+        cands = []
+        for l in self.parts.get(cls, []):
+            for j, smp in enumerate(l.samples):
+                if j >= len(l.features):
+                    continue
+                if exclude_time is not None and j < len(l.source_times) and abs(l.source_times[j] - exclude_time) < 0.005:
+                    continue
+                peak = l.peaks_db[j] if j < len(l.peaks_db) else 20.0 * np.log10(np.max(np.abs(smp)) + 1e-9)
+                cands.append((smp, peak, l.features[j]))
         if not cands or cls not in self.feat_norm:
             return None
         mean, std = (np.asarray(v, dtype=float) for v in self.feat_norm[cls])
@@ -162,10 +173,15 @@ def self_render_from_parts(
     return out
 
 
+FEATURE_NAMES = ("peak_db", "log_decay", "log_centroid", "low_db", "mid_db", "high_db")
+
+
 def segment_features(a: np.ndarray, sr: int) -> np.ndarray:
-    """一打の特徴: [ピーク dB, log10(減衰時間 秒), log(スペクトル重心 Hz)]。
+    """一打の特徴: [ピーク dB, log10(減衰時間 秒), log(スペクトル重心 Hz), 低域 dB, 中域 dB, 高域 dB]。
 
     減衰時間は 5 ms 窓の RMS が最大から 20 dB 下がるまでの時間。重心は最初の 30 ms のスペクトル。
+    帯域のエネルギー（低 <150 Hz、中 150〜2 kHz、高 >5 kHz）は最初の 60 ms の RMS（dB）で、キックの胴鳴りの量や
+    スネアの響き線の量の違いを見る。
     """
     a = np.asarray(a, dtype=np.float64)
     peak = float(np.max(np.abs(a)) + 1e-9)
@@ -183,7 +199,14 @@ def segment_features(a: np.ndarray, sr: int) -> np.ndarray:
     spec = np.abs(np.fft.rfft(head * np.hanning(head.size)))
     f = np.fft.rfftfreq(head.size, 1.0 / sr)
     centroid = float(np.sum(f * spec) / (np.sum(spec) + 1e-12)) + 1.0
-    return np.array([20.0 * np.log10(peak), np.log10(decay + 1e-3), np.log(centroid)])
+    body = a[: max(int(0.06 * sr), 128)]
+    spec_b = np.abs(np.fft.rfft(body * np.hanning(body.size))) ** 2
+    f_b = np.fft.rfftfreq(body.size, 1.0 / sr)
+    bands = []
+    for lo, hi in ((20.0, 150.0), (150.0, 2000.0), (5000.0, sr / 2)):
+        sel = (f_b >= lo) & (f_b < hi)
+        bands.append(10.0 * np.log10(np.mean(spec_b[sel]) + 1e-12) if np.any(sel) else -120.0)
+    return np.array([20.0 * np.log10(peak), np.log10(decay + 1e-3), np.log(centroid), *bands])
 
 
 def _kmeans(x: np.ndarray, k: int, rng: np.random.Generator, iters: int = 30) -> np.ndarray:
@@ -225,7 +248,7 @@ def build_kit_by_features(segments: list[Segment], sr: int, n_per_class: int | d
         std = feats.std(axis=0) + 1e-6
         z = (feats - mean) / std
         n_cls = n_per_class.get(cls, 12) if isinstance(n_per_class, dict) else n_per_class
-        reps = _kmeans(z, n_cls, rng) if len(segs) > n_cls else np.arange(len(segs))
+        reps = _kmeans(z, n_cls, rng) if 0 < n_cls < len(segs) else np.arange(len(segs))  # n_cls <= 0 なら全部を代表にする
         layer = Layer(1, 127)
         for i in sorted(reps, key=lambda i: feats[i, 0]):
             layer.samples.append(segs[i].audio)
@@ -294,6 +317,27 @@ def build_kit(
     return Kit(sr, parts)
 
 
+def _onset_lag(target: np.ndarray, sample: np.ndarray, sr: int, max_lag_sec: float = 0.015) -> int:
+    """`sample` を何サンプルずらせば立ち上がりが `target` に重なるか（相互相関、±max_lag_sec）。正なら遅らせる。"""
+    n = min(int(0.04 * sr), target.size, sample.size)
+    if n < 16:
+        return 0
+    a = np.abs(target[:n]).astype(np.float64)
+    b = np.abs(sample[:n]).astype(np.float64)
+    a -= a.mean()
+    b -= b.mean()
+    max_lag = int(max_lag_sec * sr)
+    best, best_lag = -np.inf, 0
+    for lag in range(-max_lag, max_lag + 1):
+        if lag >= 0:
+            c = float(np.dot(a[lag:], b[: n - lag]))
+        else:
+            c = float(np.dot(a[: n + lag], b[-lag:]))
+        if c > best:
+            best, best_lag = c, lag
+    return best_lag
+
+
 def render_kit(
     hits: list[Hit],
     kit: Kit,
@@ -303,6 +347,9 @@ def render_kit(
     gain_match: bool = False,
     choke: bool | set[str] = False,
     max_gain_db: float = 12.0,
+    hit_audio: list[np.ndarray | None] | None = None,
+    align: bool = False,
+    leave_one_out: bool = False,
 ) -> np.ndarray:
     """打点ラベルをキットで鳴らす。
 
@@ -311,7 +358,10 @@ def render_kit(
     - `gain_match`: `hit_levels_db`（その打の元のピーク dB）に合わせて音量を調整する（±max_gain_db まで）。
     - `choke`: 同じ種類の次の打が来たら前の音を 5 ms で止める。True なら `CHOKE_CLASSES`（シンバル以外）、
       種類の集合（例: {"hihat"}）ならその種類だけ、False なら止めない。
-    `hit_levels_db`／`hit_features` は `hits` と同じ順の並び。
+    - `align`: `hit_audio`（その打自身の区間）があれば、選んだ音の立ち上がりを相互相関で元に合わせて置く（±15 ms）。
+      打点の推定は約 10 ms 刻みなので、そのままだと最大 1 フレームずれる。
+    - `leave_one_out`: 選ぶときに、その打自身に由来する音を候補から外す（全部を代表にしたときの上限の測定用）。
+    `hit_levels_db`／`hit_features`／`hit_audio` は `hits` と同じ順の並び。
     """
     sr = kit.sr
     last = max((h.time for h in hits), default=0.0)
@@ -340,7 +390,7 @@ def render_kit(
             continue
         chosen = None
         if hit_features is not None and hit_features[i] is not None:
-            chosen = kit.pick_nearest(cls, hit_features[i])
+            chosen = kit.pick_nearest(cls, hit_features[i], exclude_time=h.time if leave_one_out else None)
         if chosen is None:
             if h.velocity is None:
                 li = len(layers) - 1
@@ -357,7 +407,9 @@ def render_kit(
         if gain_match and hit_levels_db is not None and hit_levels_db[i] is not None:
             g = 10 ** (float(np.clip(hit_levels_db[i] - peak_db, -max_gain_db, max_gain_db)) / 20)
         start = int(round(h.time * sr))
-        if start >= n:
+        if align and hit_audio is not None and hit_audio[i] is not None:
+            start += _onset_lag(hit_audio[i], s, sr)
+        if start >= n or start < 0:
             continue
         length = min(s.size, n - start)
         if cls in choke_set and i in next_same:
