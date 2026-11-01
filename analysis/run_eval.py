@@ -143,6 +143,10 @@ def timeline(x: np.ndarray, renders: dict[str, np.ndarray], hits: list[Hit], sr:
         row = {"start": t0, "end": t0 + win_sec}
         for name, y in renders.items():
             row[name] = multi_resolution_stft_distance(x[a:b], y[a:b])["total"]
+        if "self" in renders:
+            e_x = float(np.sum(x[a:b] ** 2)) + 1e-12
+            e_res = float(np.sum((x[a:b] - renders["self"][a:b]) ** 2)) + 1e-12
+            row["unexplained_db"] = 10.0 * np.log10(e_res / e_x)  # 0 dB に近いほど、打点で説明できない音が多い
         c = Counter(to_coarse(h.cls) for h in hits if t0 <= h.time < t0 + win_sec)
         for cls in ("kick", "snare", "hihat", "tom", "cymbal"):
             row[cls] = c.get(cls, 0)
@@ -292,7 +296,18 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             tl = timeline(x, {"self": ys, "C": yc}, ref_v, sr)
             worst = sorted(tl, key=lambda r: -r["C"])[:5]
             row["worst_windows"] = "; ".join(
-                f"{r['start']:.0f}-{r['end']:.0f}s C {r['C']:.2f} 自己 {r['self']:.2f} (ki{r['kick']} sn{r['snare']} hi{r['hihat']} cy{r['cymbal']})" for r in worst)
+                f"{r['start']:.0f}-{r['end']:.0f}s C {r['C']:.2f} 自己 {r['self']:.2f} 未説明 {r['unexplained_db']:.0f}dB (ki{r['kick']} sn{r['snare']} hi{r['hihat']} cy{r['cymbal']})" for r in worst)
+            # 種類ごとの損失の内訳: その種類だけ自己再現に置き換えたときの距離の下がり幅
+            d_c = row["stft_parts_features"]
+            shares = []
+            for c in sorted(part_audio):
+                keep = [i for i, h in enumerate(ref_v) if to_coarse(h.cls) != c]
+                y_rest = render_kit([ref_v[i] for i in keep], kit_f, duration=x.size / sr, hit_levels_db=[levels[i] for i in keep],
+                                    hit_features=[feats[i] for i in keep], gain_match=True, choke=CHOKE_POLICIES[choke])
+                y_self_c = self_render_from_parts({c: part_audio[c]}, [h for h in ref_v if to_coarse(h.cls) == c], x.size / sr)
+                d = multi_resolution_stft_distance(x, _match_rms(y_rest + y_self_c, x))["total"]
+                shares.append((c, d_c - d))
+            row["loss_shares"] = " ".join(f"{c[:2]}{v:+.2f}" for c, v in sorted(shares, key=lambda t: -t[1]))
             if render:
                 import csv as _csv
 
@@ -317,11 +332,11 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
 def to_markdown(rows: list[dict], title: str) -> str:
     cols = ("id", "seconds", "est_source", "truth", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
             "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_gain_choke",
-            "kit_features", "stft_parts_features_all", "stft_parts_features_hihat", "stft_parts_features_none", "stft_self", "stft_parts_sum")
+            "kit_features", "stft_parts_features_all", "stft_parts_features_hihat", "stft_parts_features_none", "loss_shares", "stft_self", "stft_parts_sum")
     heads = ("曲ID", "秒", "推定", "正解の種類", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
              "重ならない打（混合）", "層/音（混合）", "STFT（混合）", "重ならない打（パート別）", "層/音（パート別 3層×3音）", "STFT（A: 3層×3音）",
              "STFT（B: A＋音量合わせ＋チョーク）", "音の数（C: 特徴で選ぶ）", "STFT（C: チョーク全部）", "STFT（C: ハイハットだけ）", "STFT（C: チョーク無し）",
-             "STFT（自己再現）", "パートの和 vs 元")
+             "C の損失の内訳（種類を自己再現に置き換えたときの下がり幅）", "STFT（自己再現）", "パートの和 vs 元")
     lines = [f"# {title}", "", "| " + " | ".join(heads) + " |", "|" + "---|" * len(heads)]
     def f(v):
         return "" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
@@ -350,7 +365,8 @@ def to_markdown(rows: list[dict], title: str) -> str:
         lines += ["", "## 曲ごとの悪い区間（方式 C の距離が大きい 2 秒窓、上位 5。自己再現も悪ければ打点側、自己再現が良ければ代表音の不足）", ""]
         for sid, w in worst:
             lines.append(f"- {sid}: {w}")
-        lines.append("- `--render` を付けると各曲のフォルダに `timeline.csv`（1 秒ごとの距離と打数）も書く。")
+        lines.append("- 「未説明」は、その窓で打点から再現できなかった音の割合（残差のエネルギー ÷ 元のエネルギー、dB）。0 dB に近いほど、打点に無い音（パーカッション、残響の尾など）が多い。")
+        lines.append("- `--render` を付けると各曲のフォルダに `timeline.csv`（1 秒ごとの距離・未説明・打数）も書く。")
     lines.append("- STFT 距離は、比べる音の RMS を元に合わせてから測る（全体の音量差は見ない）。")
     ds = [r["stft_self"] for r in rows if "stft_self" in r]
     if ds:
