@@ -87,6 +87,10 @@ def test_augment_and_bleed(tmp_path):
     x = render([Hit(0.1, "kick", 100), Hit(0.6, "snare", 100)], sr=sr, duration=2.0)
     y = augment(x, sr, np.random.default_rng(3), files)
     assert y.shape == x.shape and np.max(np.abs(y)) <= 1.0 and not np.allclose(x, y)
+    # 乱数をたくさん回しても落ちない（ローパスのカットオフがナイキストを超えて止まった不具合の再発防止）
+    for seed in range(300):
+        y = augment(x, sr, np.random.default_rng(seed), files)
+        assert np.all(np.isfinite(y))
 
 
 def test_train_egmd_and_eval(tmp_path):

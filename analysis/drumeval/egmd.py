@@ -119,12 +119,15 @@ def augment(x: np.ndarray, sr: int, rng: np.random.Generator, bleed_files: list[
     y = x.astype(np.float64)
     # 音量
     y *= 10 ** (rng.uniform(-12.0, 6.0) / 20)
-    # EQ: 低域か高域を落とす（分離や録音の違い）
+    # EQ: 低域か高域を落とす（分離や録音の違い）。カットオフはナイキスト周波数の内側に収める
     if rng.random() < 0.5:
+        nyq = sr / 2
         if rng.random() < 0.5:
-            b, a = butter(2, rng.uniform(3000.0, 12000.0) / (sr / 2))
+            fc = rng.uniform(3000.0, min(12000.0, 0.9 * nyq))
+            b, a = butter(2, fc / nyq)
         else:
-            b, a = butter(2, rng.uniform(30.0, 150.0) / (sr / 2), btype="high")
+            fc = rng.uniform(30.0, 150.0)
+            b, a = butter(2, fc / nyq, btype="high")
         y = lfilter(b, a, y)
     # にじみ: ドラム以外のステムを混ぜる
     if bleed_files and rng.random() < 0.6:
