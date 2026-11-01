@@ -35,15 +35,41 @@ class Layer:
     vel_hi: int
     samples: list[np.ndarray] = field(default_factory=list)  # ラウンドロビン
     source_times: list[float] = field(default_factory=list)
+    peaks_db: list[float] = field(default_factory=list)  # 各音のピーク（音量合わせ用）
+    features: list[list[float]] = field(default_factory=list)  # 各音の特徴（近い音を選ぶ用。無ければ空）
 
 
 @dataclass
 class Kit:
     sr: int
     parts: dict[str, list[Layer]]  # 種類 → 弱い層から強い層へ
+    feat_norm: dict[str, tuple[list[float], list[float]]] = field(default_factory=dict)  # 種類 → (平均, 標準偏差)。特徴の正規化
 
     def n_samples(self, cls: str) -> int:
         return sum(len(l.samples) for l in self.parts.get(cls, []))
+
+    def all_samples(self, cls: str) -> list[tuple[np.ndarray, float, list[float] | None]]:
+        out = []
+        for l in self.parts.get(cls, []):
+            for j, smp in enumerate(l.samples):
+                peak = l.peaks_db[j] if j < len(l.peaks_db) else 20.0 * np.log10(np.max(np.abs(smp)) + 1e-9)
+                feat = l.features[j] if j < len(l.features) else None
+                out.append((smp, peak, feat))
+        return out
+
+    def pick_nearest(self, cls: str, feature: np.ndarray) -> tuple[np.ndarray, float] | None:
+        """特徴の近い音を返す（音, ピーク dB）。特徴の無いキットなら None。"""
+        cands = [(smp, peak, f) for smp, peak, f in self.all_samples(cls) if f is not None]
+        if not cands or cls not in self.feat_norm:
+            return None
+        mean, std = (np.asarray(v, dtype=float) for v in self.feat_norm[cls])
+        q = (np.asarray(feature, dtype=float) - mean) / std
+        d = [np.sum(((np.asarray(f) - mean) / std - q) ** 2) for _, _, f in cands]
+        smp, peak, _ = cands[int(np.argmin(d))]
+        return smp, peak
+
+
+CHOKE_CLASSES = {"kick", "snare", "hihat", "tom"}  # 同じ種類の次の打で音を止める（シンバルは重ねる）
 
 
 def select_isolated_hits(hits: list[Hit], pre_sec: float = 0.1, post_sec: float = 0.15) -> list[tuple[Hit, float]]:
@@ -136,6 +162,101 @@ def self_render_from_parts(
     return out
 
 
+def segment_features(a: np.ndarray, sr: int) -> np.ndarray:
+    """一打の特徴: [ピーク dB, log10(減衰時間 秒), log(スペクトル重心 Hz)]。
+
+    減衰時間は 5 ms 窓の RMS が最大から 20 dB 下がるまでの時間。重心は最初の 30 ms のスペクトル。
+    """
+    a = np.asarray(a, dtype=np.float64)
+    peak = float(np.max(np.abs(a)) + 1e-9)
+    win = max(int(0.005 * sr), 1)
+    n = a.size // win
+    if n >= 1:
+        env = np.sqrt(np.mean(a[: n * win].reshape(n, win) ** 2, axis=1) + 1e-12)
+        env_db = 20.0 * np.log10(env)
+        i_max = int(np.argmax(env_db))
+        below = np.flatnonzero(env_db[i_max:] < env_db[i_max] - 20.0)
+        decay = (i_max + below[0]) * win / sr if below.size else a.size / sr
+    else:
+        decay = a.size / sr
+    head = a[: max(int(0.03 * sr), 64)]
+    spec = np.abs(np.fft.rfft(head * np.hanning(head.size)))
+    f = np.fft.rfftfreq(head.size, 1.0 / sr)
+    centroid = float(np.sum(f * spec) / (np.sum(spec) + 1e-12)) + 1.0
+    return np.array([20.0 * np.log10(peak), np.log10(decay + 1e-3), np.log(centroid)])
+
+
+def _kmeans(x: np.ndarray, k: int, rng: np.random.Generator, iters: int = 30) -> np.ndarray:
+    """小さな k-means（k-means++ の初期化）。返り値は各中心に最も近い点の添字（代表）。"""
+    n = x.shape[0]
+    k = min(k, n)
+    centers = [x[int(rng.integers(n))]]
+    for _ in range(1, k):
+        d2 = np.min([np.sum((x - c) ** 2, axis=1) for c in centers], axis=0)
+        probs = d2 / (d2.sum() + 1e-12) if d2.sum() > 0 else np.full(n, 1.0 / n)
+        centers.append(x[int(rng.choice(n, p=probs))])
+    centers = np.asarray(centers)
+    for _ in range(iters):
+        assign = np.argmin([np.sum((x - c) ** 2, axis=1) for c in centers], axis=0)
+        new = np.array([x[assign == j].mean(axis=0) if np.any(assign == j) else centers[j] for j in range(k)])
+        if np.allclose(new, centers):
+            break
+        centers = new
+    reps = sorted({int(np.argmin(np.sum((x - c) ** 2, axis=1))) for c in centers})
+    return np.asarray(reps)
+
+
+def build_kit_by_features(segments: list[Segment], sr: int, n_per_class: int = 12, seed: int = 0,
+                          classes: tuple[str, ...] = COARSE_CLASSES) -> Kit:
+    """種類ごとに、特徴空間（音量・減衰・明るさ）の k-means の代表 `n_per_class` 音でキットを作る。
+
+    3 層 × 3 音のように音量だけで選ぶのではなく、奏法の違い（開いた／閉じたハイハット、リムなど）も代表に残る。
+    再生時は各打の特徴に最も近い音を選び、音量を合わせる（`render_kit(..., hit_features=...)`）。
+    """
+    rng = np.random.default_rng(seed)
+    parts: dict[str, list[Layer]] = {}
+    feat_norm: dict[str, tuple[list[float], list[float]]] = {}
+    for cls in classes:
+        segs = [s for s in segments if s.cls == cls]
+        if not segs:
+            continue
+        feats = np.array([segment_features(s.audio, sr) for s in segs])
+        mean = feats.mean(axis=0)
+        std = feats.std(axis=0) + 1e-6
+        z = (feats - mean) / std
+        reps = _kmeans(z, n_per_class, rng) if len(segs) > n_per_class else np.arange(len(segs))
+        layer = Layer(1, 127)
+        for i in sorted(reps, key=lambda i: feats[i, 0]):
+            layer.samples.append(segs[i].audio)
+            layer.source_times.append(segs[i].time)
+            layer.peaks_db.append(float(feats[i, 0]))
+            layer.features.append([float(v) for v in feats[i]])
+        parts[cls] = [layer]
+        feat_norm[cls] = ([float(v) for v in mean], [float(v) for v in std])
+    return Kit(sr, parts, feat_norm)
+
+
+def hit_segments_from_parts(parts: dict[str, tuple[np.ndarray, int]], hits: list[Hit], max_len_sec: float = 1.5) -> list[np.ndarray | None]:
+    """各打の「自分の区間」（打点から同じ種類の次の打まで、上限 max_len_sec）をパート別ステムから取る。hits と同じ順。"""
+    out: list[np.ndarray | None] = [None] * len(hits)
+    by_cls: dict[str, list[int]] = {}
+    for i, h in enumerate(hits):
+        by_cls.setdefault(to_coarse(h.cls), []).append(i)
+    for cls, idx in by_cls.items():
+        if cls not in parts:
+            continue
+        x, sr = parts[cls]
+        idx = sorted(idx, key=lambda i: hits[i].time)
+        for k, i in enumerate(idx):
+            t = hits[i].time
+            next_t = hits[idx[k + 1]].time if k + 1 < len(idx) else t + max_len_sec
+            start = int(round(t * sr))
+            end = min(start + int(min(next_t - t, max_len_sec) * sr), x.size)
+            if end - start >= int(0.005 * sr):
+                out[i] = x[start:end]
+    return out
+
+
 def build_kit(
     segments: list[Segment],
     sr: int,
@@ -166,13 +287,30 @@ def build_kit(
             for j in sorted(order):
                 layer.samples.append(chunk[j].audio)
                 layer.source_times.append(chunk[j].time)
+                layer.peaks_db.append(chunk[j].peak_db)
             layers.append(layer)
         parts[cls] = layers
     return Kit(sr, parts)
 
 
-def render_kit(hits: list[Hit], kit: Kit, duration: float | None = None) -> np.ndarray:
-    """打点ラベルをキットで鳴らす。強さが無い打は最も強い層を使う。"""
+def render_kit(
+    hits: list[Hit],
+    kit: Kit,
+    duration: float | None = None,
+    hit_levels_db: list[float | None] | None = None,
+    hit_features: list[np.ndarray | None] | None = None,
+    gain_match: bool = False,
+    choke: bool = False,
+    max_gain_db: float = 12.0,
+) -> np.ndarray:
+    """打点ラベルをキットで鳴らす。
+
+    - 音の選び方: `hit_features` があれば（特徴の入ったキットで）最も近い音。無ければ強さの層とラウンドロビン。
+      強さが無い打は最も強い層を使う。
+    - `gain_match`: `hit_levels_db`（その打の元のピーク dB）に合わせて音量を調整する（±max_gain_db まで）。
+    - `choke`: 同じ種類の次の打が来たら前の音を 5 ms で止める（シンバルは止めない）。
+    `hit_levels_db`／`hit_features` は `hits` と同じ順の並び。
+    """
     sr = kit.sr
     last = max((h.time for h in hits), default=0.0)
     if duration is None:
@@ -180,24 +318,54 @@ def render_kit(hits: list[Hit], kit: Kit, duration: float | None = None) -> np.n
     n = int(duration * sr)
     out = np.zeros(n)
     rr_index: dict[tuple[str, int], int] = {}
-    for h in sorted(hits, key=lambda h: h.time):
+    order = sorted(range(len(hits)), key=lambda i: hits[i].time)
+    # 同じ種類の次の打の時刻（チョーク用）
+    next_same: dict[int, float] = {}
+    last_of_cls: dict[str, int] = {}
+    for i in order:
+        c = to_coarse(hits[i].cls)
+        if c in last_of_cls:
+            next_same[last_of_cls[c]] = hits[i].time
+        last_of_cls[c] = i
+    fade = max(int(0.005 * sr), 1)
+
+    for i in order:
+        h = hits[i]
         cls = to_coarse(h.cls)
         layers = kit.parts.get(cls)
         if not layers:
             continue
-        if h.velocity is None:
-            li = len(layers) - 1
-        else:
-            li = next((i for i, l in enumerate(layers) if l.vel_lo <= h.velocity <= l.vel_hi), len(layers) - 1)
-        layer = layers[li]
-        key = (cls, li)
-        j = rr_index.get(key, 0) % len(layer.samples)
-        rr_index[key] = j + 1
-        s = layer.samples[j]
+        chosen = None
+        if hit_features is not None and hit_features[i] is not None:
+            chosen = kit.pick_nearest(cls, hit_features[i])
+        if chosen is None:
+            if h.velocity is None:
+                li = len(layers) - 1
+            else:
+                li = next((k for k, l in enumerate(layers) if l.vel_lo <= h.velocity <= l.vel_hi), len(layers) - 1)
+            layer = layers[li]
+            key = (cls, li)
+            j = rr_index.get(key, 0) % len(layer.samples)
+            rr_index[key] = j + 1
+            peak = layer.peaks_db[j] if j < len(layer.peaks_db) else 20.0 * np.log10(np.max(np.abs(layer.samples[j])) + 1e-9)
+            chosen = (layer.samples[j], peak)
+        s, peak_db = chosen
+        g = 1.0
+        if gain_match and hit_levels_db is not None and hit_levels_db[i] is not None:
+            g = 10 ** (float(np.clip(hit_levels_db[i] - peak_db, -max_gain_db, max_gain_db)) / 20)
         start = int(round(h.time * sr))
-        end = min(start + s.size, n)
-        if start < n:
-            out[start:end] += s[: end - start]
+        if start >= n:
+            continue
+        length = min(s.size, n - start)
+        if choke and cls in CHOKE_CLASSES and i in next_same:
+            limit = int((next_same[i] - h.time) * sr) + fade
+            length = min(length, max(limit, fade))
+        seg = s[:length] * g
+        if length < s.size:
+            seg = seg.copy()
+            k = min(fade, seg.size)
+            seg[-k:] *= np.linspace(1.0, 0.0, k)
+        out[start : start + length] += seg
     return out
 
 
@@ -243,7 +411,9 @@ def save_kit(kit: Kit, out_dir: str | Path) -> None:
                 name = f"{cls}/layer{li + 1}_rr{j + 1}.wav"
                 sf.write(out / name, s.astype(np.float32), kit.sr)
                 files.append(name)
-            meta["parts"][cls].append({"vel_lo": layer.vel_lo, "vel_hi": layer.vel_hi, "files": files, "source_times": layer.source_times})
+            meta["parts"][cls].append({"vel_lo": layer.vel_lo, "vel_hi": layer.vel_hi, "files": files, "source_times": layer.source_times,
+                                       "peaks_db": layer.peaks_db, "features": layer.features})
+    meta["feat_norm"] = kit.feat_norm
     (out / "kit.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -256,9 +426,11 @@ def load_kit(kit_dir: str | Path) -> Kit:
     for cls, layers in meta["parts"].items():
         parts[cls] = []
         for l in layers:
-            layer = Layer(l["vel_lo"], l["vel_hi"], source_times=list(l.get("source_times", [])))
+            layer = Layer(l["vel_lo"], l["vel_hi"], source_times=list(l.get("source_times", [])),
+                          peaks_db=list(l.get("peaks_db", [])), features=list(l.get("features", [])))
             for f in l["files"]:
                 a, _ = sf.read(d / f, dtype="float64", always_2d=True)
                 layer.samples.append(a.mean(axis=1))
             parts[cls].append(layer)
-    return Kit(int(meta["sr"]), parts)
+    feat_norm = {k: (list(v[0]), list(v[1])) for k, v in meta.get("feat_norm", {}).items()}
+    return Kit(int(meta["sr"]), parts, feat_norm)

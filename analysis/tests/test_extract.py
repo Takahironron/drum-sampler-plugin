@@ -78,3 +78,45 @@ def test_kit_roundtrip(tmp_path):
     assert back.sr == sr
     assert {c: back.n_samples(c) for c in back.parts} == {c: kit.n_samples(c) for c in kit.parts}
     assert (tmp_path / "kit" / "kit.json").exists()
+
+
+def test_feature_kit_with_gain_and_choke_is_closer_than_3x3():
+    """特徴で選ぶ代表音＋音量合わせ＋チョークは、3 層 × 3 音より元に近い（合成音）。"""
+    from drumeval.extract import build_kit_by_features, hit_segments_from_parts, segment_features
+    from drumeval.labels import to_coarse
+
+    sr = 22050
+    rng = np.random.default_rng(5)
+    ref = _sparse_pattern(12)
+    # 開いたハイハットを混ぜて奏法の違いを作る
+    ref = [Hit(h.time, "hihat_open" if (h.cls == "hihat_closed" and rng.random() < 0.3) else h.cls, h.velocity) for h in ref]
+    dur = max(h.time for h in ref) + 1.5
+    parts = {}
+    mix = np.zeros(int(dur * sr))
+    for cls in ("kick", "snare", "hihat"):
+        part = render([h for h in ref if to_coarse(h.cls) == cls], sr=sr, duration=dur, variation=0.0)
+        parts[cls] = (part, sr)
+        mix += part
+    segs = cut_segments(x := mix, sr, ref)  # noqa: F841  （混合からの切り出しは使わない）
+    from drumeval.extract import cut_segments_from_parts
+
+    segs_p = cut_segments_from_parts(parts, ref)
+    own = hit_segments_from_parts(parts, ref)
+    levels = [20 * np.log10(np.max(np.abs(a)) + 1e-9) if a is not None else None for a in own]
+    feats = [segment_features(a, sr) if a is not None else None for a in own]
+    kit_a = build_kit(segs_p, sr)
+    kit_c = build_kit_by_features(segs_p, sr, n_per_class=8)
+    assert kit_c.n_samples("hihat") <= 8 and kit_c.feat_norm["hihat"]
+    ya = render_kit(ref, kit_a, duration=dur)
+    yc = render_kit(ref, kit_c, duration=dur, hit_levels_db=levels, hit_features=feats, gain_match=True, choke=True)
+    da = multi_resolution_stft_distance(mix, ya)["total"]
+    dc = multi_resolution_stft_distance(mix, yc)["total"]
+    assert dc < da, (da, dc)
+    # 保存と読み込みで特徴も残る
+    import tempfile
+
+    d = Path(tempfile.mkdtemp()) / "kit"
+    save_kit(kit_c, d)
+    back = load_kit(d)
+    assert back.feat_norm.keys() == kit_c.feat_norm.keys()
+    assert back.pick_nearest("kick", feats[0]) is not None

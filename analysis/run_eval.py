@@ -31,7 +31,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from drumeval import Hit, load_hits, multi_resolution_stft_distance, transcription_scores  # noqa: E402
 from drumeval.baseline import onsets_from_part, transcribe  # noqa: E402
-from drumeval.extract import build_kit, cut_segments, cut_segments_from_parts, estimate_velocities, render_kit, self_render_from_parts  # noqa: E402
+from drumeval.extract import (  # noqa: E402
+    build_kit, build_kit_by_features, cut_segments, cut_segments_from_parts, estimate_velocities, hit_segments_from_parts,
+    render_kit, segment_features, self_render_from_parts,
+)
 from drumeval.labels import M0_CLASSES, to_coarse  # noqa: E402
 from stft_distance import load_mono  # noqa: E402
 
@@ -160,7 +163,7 @@ def _counts(hits: list[Hit]) -> str:
 
 
 def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song_id: str | None = None, wav: Path | None = None,
-                  model: str | None = None, render: bool = False, threshold: float | None = None) -> dict:
+                  model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: int = 12) -> dict:
     wav = wav or find_stem(song_dir)
     x, sr = load_mono(str(wav), None)
     if max_seconds and x.size > max_seconds * sr:
@@ -229,29 +232,39 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
                 ref_v += estimate_velocities(own, None, px, psr)
         ref_v.sort(key=lambda h: h.time)
         segs_p = cut_segments_from_parts(part_audio, ref_v)
-        kit_p = build_kit(segs_p, sr)
         total = np.zeros_like(x)
         for c, (px, psr) in part_audio.items():
             total[: px.size] += px
         row["stft_parts_sum"] = multi_resolution_stft_distance(x, _match_rms(total, x))["total"]  # 分離の整合性（0 に近いほどパートの和が元に等しい）
         write_hits_midi(ref_v, song_dir / "hits_pseudo.mid")  # DAW で確かめる用
-        if render:
-            write_audition(kit_p, song_dir / "kit_parts_audition.wav")
         ys = _match_rms(self_render_from_parts(part_audio, ref_v, x.size / sr), x)
         row["stft_self"] = multi_resolution_stft_distance(x, ys)["total"]  # 自己再現: 打点の誤りと区間の切り方だけの損失
-        if render:
-            import soundfile as sf
-
-            sf.write(song_dir / "rerender_self.wav", (ys / (np.max(np.abs(ys)) + 1e-9) * 0.9).astype(np.float32), sr)
+        # 各打の「自分の区間」から、元の音量と特徴（音量・減衰・明るさ）を取る
+        own = hit_segments_from_parts(part_audio, ref_v)
+        levels = [20.0 * np.log10(np.max(np.abs(a)) + 1e-9) if a is not None else None for a in own]
+        feats = [segment_features(a, sr) if a is not None else None for a in own]
         row["n_isolated_parts"] = len(segs_p)
+        # A: 3 層 × 3 音（従来）
+        kit_p = build_kit(segs_p, sr)
         row["layers_parts"] = ", ".join(f"{c}:{len(ls)}/{kit_p.n_samples(c)}" for c, ls in kit_p.parts.items())
         if kit_p.parts:
             yp = _match_rms(render_kit(ref_v, kit_p, duration=x.size / sr), x)
             row["stft_rerender_parts"] = multi_resolution_stft_distance(x, yp)["total"]
+            # B: 3 層 × 3 音 ＋ 打ごとの音量合わせ ＋ チョーク
+            yb = _match_rms(render_kit(ref_v, kit_p, duration=x.size / sr, hit_levels_db=levels, gain_match=True, choke=True), x)
+            row["stft_parts_gain_choke"] = multi_resolution_stft_distance(x, yb)["total"]
+            # C: 特徴で選んだ代表 kit_size 音 ＋ 特徴の近い音を選ぶ ＋ 音量合わせ ＋ チョーク
+            kit_f = build_kit_by_features(segs_p, sr, n_per_class=kit_size)
+            yc = _match_rms(render_kit(ref_v, kit_f, duration=x.size / sr, hit_levels_db=levels, hit_features=feats, gain_match=True, choke=True), x)
+            row["stft_parts_features"] = multi_resolution_stft_distance(x, yc)["total"]
+            row["kit_features"] = ", ".join(f"{c}:{kit_f.n_samples(c)}" for c in kit_f.parts)
             if render:
                 import soundfile as sf
 
-                sf.write(song_dir / "rerender_parts.wav", (yp / (np.max(np.abs(yp)) + 1e-9) * 0.9).astype(np.float32), sr)
+                sf.write(song_dir / "rerender_parts_3x3.wav", (yp / (np.max(np.abs(yp)) + 1e-9) * 0.9).astype(np.float32), sr)
+                sf.write(song_dir / "rerender_parts.wav", (yc / (np.max(np.abs(yc)) + 1e-9) * 0.9).astype(np.float32), sr)
+                sf.write(song_dir / "rerender_self.wav", (ys / (np.max(np.abs(ys)) + 1e-9) * 0.9).astype(np.float32), sr)
+                write_audition(kit_f, song_dir / "kit_parts_audition.wav")
     if render:
         import soundfile as sf
 
@@ -261,9 +274,11 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
 
 def to_markdown(rows: list[dict], title: str) -> str:
     cols = ("id", "seconds", "est_source", "truth", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
-            "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_self", "stft_parts_sum")
+            "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_gain_choke",
+            "kit_features", "stft_parts_features", "stft_self", "stft_parts_sum")
     heads = ("曲ID", "秒", "推定", "正解の種類", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
-             "重ならない打（混合）", "層/音（混合）", "STFT 距離（混合）", "重ならない打（パート別）", "層/音（パート別）", "STFT 距離（パート別）", "STFT 距離（自己再現）", "パートの和 vs 元")
+             "重ならない打（混合）", "層/音（混合）", "STFT（混合）", "重ならない打（パート別）", "層/音（パート別 3層×3音）", "STFT（A: 3層×3音）",
+             "STFT（B: A＋音量合わせ＋チョーク）", "音の数（C: 特徴で選ぶ）", "STFT（C: 特徴＋音量合わせ＋チョーク）", "STFT（自己再現）", "パートの和 vs 元")
     lines = [f"# {title}", "", "| " + " | ".join(heads) + " |", "|" + "---|" * len(heads)]
     def f(v):
         return "" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
@@ -281,7 +296,9 @@ def to_markdown(rows: list[dict], title: str) -> str:
         lines.append(f"- 再現との STFT 距離の平均（混ざったドラムから切り出し）: {np.mean(d):.3f}（M0-2 の聞き比べの参考。小さいほど近い）")
     dp = [r["stft_rerender_parts"] for r in rows if "stft_rerender_parts" in r]
     if dp:
-        lines.append(f"- 再現との STFT 距離の平均（パート別ステムから切り出し、{len(dp)} 曲）: {np.mean(dp):.3f}")
+        lines.append(f"- 再現との STFT 距離の平均（パート別ステムから切り出し、{len(dp)} 曲）: A（3層×3音）{np.mean(dp):.3f}、"
+                     f"B（A＋音量合わせ＋チョーク）{np.mean([r['stft_parts_gain_choke'] for r in rows if 'stft_parts_gain_choke' in r]):.3f}、"
+                     f"C（特徴で選ぶ代表音＋音量合わせ＋チョーク）{np.mean([r['stft_parts_features'] for r in rows if 'stft_parts_features' in r]):.3f}")
     lines.append("- 「種類別」の打数は ki=kick、sn=snare、hi=hihat、to=tom、cy=cymbal。")
     lines.append("- STFT 距離は、比べる音の RMS を元に合わせてから測る（全体の音量差は見ない）。")
     ds = [r["stft_self"] for r in rows if "stft_self" in r]
@@ -299,8 +316,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--est-dir", default=None, help="採譜の推定 CSV（<曲ID>.csv）の置き場")
     ap.add_argument("--max-seconds", type=float, default=60.0, help="曲の先頭から使う長さ（0 で全部）")
     ap.add_argument("--model", default=None, help="ONNX の採譜モデル（指定すると基準値の代わりに使う。onnxruntime が要る）")
-    ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts / rerender_self / kit_parts_audition）を各曲のフォルダに書く")
+    ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts_3x3 / rerender_parts / rerender_self / kit_parts_audition）を各曲のフォルダに書く")
     ap.add_argument("--threshold", type=float, default=None, help="--model の打点のしきい値（既定はモデルの設定、0.5）")
+    ap.add_argument("--kit-size", type=int, default=12, help="方式 C で種類ごとに残す代表の音の数")
     args = ap.parse_args(argv)
 
     stems_dir = Path(args.stems_dir)
@@ -318,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
     for song_id, d, f in songs:
         est = Path(args.est_dir) / f"{song_id}.csv" if args.est_dir else None
         print(f"{song_id} ({f.name}) ...", file=sys.stderr)
-        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold))
+        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold, kit_size=args.kit_size))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
