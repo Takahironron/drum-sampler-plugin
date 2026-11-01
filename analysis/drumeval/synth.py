@@ -136,3 +136,41 @@ def render(
 
     peak = np.max(np.abs(out)) + 1e-9
     return out / peak * 0.9 if peak > 0.9 else out
+
+
+def random_pattern(rng: np.random.Generator, seconds: float = 6.0, five_classes: bool = True) -> list[Hit]:
+    """16 分のグリッドに、種類ごとの確率で打を置く乱数パターン（学習データ用）。
+
+    テンポ・強さ・ゴースト・休符・揺れを乱数で。`five_classes` ならタムとシンバルも少し入れる。
+    """
+    bpm = rng.uniform(75, 175)
+    step = 60.0 / bpm / 4
+    n_steps = int(seconds / step)
+    p_kick = rng.uniform(0.15, 0.6)
+    p_snare = rng.uniform(0.1, 0.35)
+    p_hat = rng.uniform(0.2, 0.9)
+    four_on_floor = rng.random() < 0.3  # 4 つ打ち（電子系）
+    hits: list[Hit] = []
+    t0 = rng.uniform(0.05, 0.3)
+    for i in range(n_steps):
+        t = t0 + i * step + rng.normal(0, 0.004)
+        if t >= seconds - 0.2:
+            break
+        beat_pos = i % 4
+        if four_on_floor:
+            if beat_pos == 0:
+                hits.append(Hit(t, "kick", int(rng.integers(90, 128))))
+        elif rng.random() < (p_kick * (2.0 if beat_pos == 0 else 0.6)):
+            hits.append(Hit(t, "kick", int(rng.integers(50, 128))))
+        if rng.random() < (p_snare * (2.5 if (i % 8) == 4 else 0.4)):
+            hits.append(Hit(t, "snare", int(rng.integers(40, 128))))
+        if rng.random() < (p_hat * (1.0 if beat_pos % 2 == 0 else 0.6)):
+            hits.append(Hit(t, "hihat_open" if rng.random() < 0.15 else "hihat_closed", int(rng.integers(30, 120))))
+        if five_classes:
+            if rng.random() < 0.03:
+                hits.append(Hit(t, rng.choice(["tom_high", "tom_mid", "tom_low"]), int(rng.integers(60, 128))))
+            if (i % 16) == 0 and rng.random() < 0.3:
+                hits.append(Hit(t, rng.choice(["crash", "ride"]), int(rng.integers(70, 128))))
+            elif rng.random() < 0.02:
+                hits.append(Hit(t, "ride", int(rng.integers(50, 110))))
+    return hits

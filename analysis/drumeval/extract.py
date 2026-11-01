@@ -206,7 +206,7 @@ def _kmeans(x: np.ndarray, k: int, rng: np.random.Generator, iters: int = 30) ->
     return np.asarray(reps)
 
 
-def build_kit_by_features(segments: list[Segment], sr: int, n_per_class: int = 12, seed: int = 0,
+def build_kit_by_features(segments: list[Segment], sr: int, n_per_class: int | dict[str, int] = 12, seed: int = 0,
                           classes: tuple[str, ...] = COARSE_CLASSES) -> Kit:
     """種類ごとに、特徴空間（音量・減衰・明るさ）の k-means の代表 `n_per_class` 音でキットを作る。
 
@@ -224,7 +224,8 @@ def build_kit_by_features(segments: list[Segment], sr: int, n_per_class: int = 1
         mean = feats.mean(axis=0)
         std = feats.std(axis=0) + 1e-6
         z = (feats - mean) / std
-        reps = _kmeans(z, n_per_class, rng) if len(segs) > n_per_class else np.arange(len(segs))
+        n_cls = n_per_class.get(cls, 12) if isinstance(n_per_class, dict) else n_per_class
+        reps = _kmeans(z, n_cls, rng) if len(segs) > n_cls else np.arange(len(segs))
         layer = Layer(1, 127)
         for i in sorted(reps, key=lambda i: feats[i, 0]):
             layer.samples.append(segs[i].audio)

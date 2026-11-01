@@ -14,6 +14,7 @@ E-GMD（実データ。CC BY 4.0。GPU があれば自動で使う）::
 - `--bleed-dir` にドラム以外のステムがあるフォルダを渡すと、それを混ぜて「分離の残り」を模す（ドラム系の名前のファイルは自動で除く）。
   CD 曲のステムを混ぜたモデルは評価用に限る（製品のモデルには権利の明確な音だけを使う。R3）。
 - 出力: `<out>.onnx` と、特徴量の設定・種類・しきい値を書いた `<out>.json`。チェックポイント `<out>.pt` も毎エポック書く。
+  エポックごとの検証の結果は `<out>.log.txt` に残る。
 - 検証: E-GMD の validation 分割から `--val-tracks` 本（先頭 `--val-seconds` 秒）で種類ごとの F 値を出し、しきい値 0.3／0.4／0.5 のうち
   M0-1（kick/snare/hihat の F の平均）が最も高いものを ONNX の設定に書く。
 """
@@ -42,32 +43,11 @@ THRESHOLDS = (0.3, 0.4, 0.5)
 # 合成データ
 # ---------------------------------------------------------------------------
 
-def random_pattern(rng: np.random.Generator, seconds: float = 6.0) -> list[Hit]:
-    """16分のグリッドに、種類ごとの確率で打を置く。テンポ・強さ・ゴースト・休符を乱数で。"""
-    bpm = rng.uniform(75, 170)
-    step = 60.0 / bpm / 4
-    n_steps = int(seconds / step)
-    p_kick = rng.uniform(0.15, 0.5)
-    p_snare = rng.uniform(0.1, 0.35)
-    p_hat = rng.uniform(0.3, 0.9)
-    hits: list[Hit] = []
-    t0 = rng.uniform(0.05, 0.3)
-    for i in range(n_steps):
-        t = t0 + i * step + rng.normal(0, 0.004)
-        if t >= seconds - 0.2:
-            break
-        beat_pos = i % 4
-        if rng.random() < (p_kick * (2.0 if beat_pos == 0 else 0.6)):
-            hits.append(Hit(t, "kick", int(rng.integers(50, 128))))
-        if rng.random() < (p_snare * (2.5 if (i % 8) == 4 else 0.4)):
-            hits.append(Hit(t, "snare", int(rng.integers(40, 128))))
-        if rng.random() < (p_hat * (1.0 if beat_pos % 2 == 0 else 0.6)):
-            hits.append(Hit(t, "hihat_closed", int(rng.integers(30, 120))))
-    return hits
+from drumeval.synth import random_pattern  # noqa: E402
 
 
 def make_example(rng: np.random.Generator, cfg: FeatureConfig, classes: tuple[str, ...], seconds: float = 6.0):
-    hits = random_pattern(rng, seconds)
+    hits = random_pattern(rng, seconds, five_classes=len(classes) > 3)
     x = render(hits, sr=cfg.sr, duration=seconds, bleed=float(rng.uniform(0, 0.5)),
                reverb_tail=float(rng.choice([0.0, rng.uniform(0.1, 0.6)])), seed=int(rng.integers(1 << 30)),
                variation=float(rng.uniform(0.3, 1.0)))
@@ -237,14 +217,15 @@ def train_egmd(args) -> int:
     print(f"E-GMD: 学習 {len(train)} 本（キット {len(kits)} 種）、検証 {len(val)} 本、にじみ用の音声 {len(bleed)} 本、device={device}", flush=True)
 
     ds = EGMDChunks(train, cfg, chunk_sec=args.seconds, chunks_per_track=args.chunks_per_track, bleed_files=bleed,
-                    do_augment=not args.no_augment, classes=classes, seed=args.seed)
+                    do_augment=not args.no_augment, classes=classes, seed=args.seed, synthetic_ratio=args.synthetic_ratio)
     dl = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=args.workers, drop_last=True,
                     persistent_workers=args.workers > 0)
     model = DrumCRNN(cfg.n_mels, len(classes), hidden=args.hidden).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     total_steps = max(len(dl) * args.epochs, 1)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
-    pos_weight = torch.tensor([8.0] * len(classes), device=device)
+    # 打点のフレームは少ないので重みを付ける。タムは少ないので重く、シンバルは誤検出が多いので軽く
+    pos_weight = torch.tensor([6.0, 6.0, 6.0, 8.0, 4.0][: len(classes)], device=device)
 
     def predict(feat: np.ndarray) -> np.ndarray:
         model.eval()
@@ -253,10 +234,19 @@ def train_egmd(args) -> int:
         model.train()
         return p
 
-    print("検証データを読む...", flush=True)
-    val_examples = load_eval_examples(val, cfg, args.val_seconds)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    log_path = out.with_suffix(".log.txt")
+    log_path.write_text(f"E-GMD: 学習 {len(train)} 本（キット {len(kits)} 種）、検証 {len(val)} 本、にじみ用の音声 {len(bleed)} 本、"
+                        f"合成の混ぜ込み {args.synthetic_ratio:g}、hidden {args.hidden}、batch {args.batch}、epochs {args.epochs}、lr {args.lr}\n", encoding="utf-8")
+
+    def log(msg: str) -> None:
+        print(msg, flush=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+
+    print("検証データを読む...", flush=True)
+    val_examples = load_eval_examples(val, cfg, args.val_seconds)
     best_m0, best_thr = -1.0, 0.5
     t_start = time.time()
     step = 0
@@ -279,17 +269,18 @@ def train_egmd(args) -> int:
                 print(f"  epoch {epoch} step {step}/{total_steps}  loss {np.mean(losses[-50:]):.4f}  ({time.time() - t_start:.0f}s)", flush=True)
         scores = score_examples(predict, val_examples, cfg, classes)
         thr = max(scores, key=lambda k: scores[k]["m0_1"])
-        print(f"epoch {epoch}  loss {np.mean(losses):.4f}  検証（{len(val_examples)} 本 × {args.val_seconds:.0f} 秒）:\n{format_scores(scores, classes)}", flush=True)
+        log(f"epoch {epoch}  loss {np.mean(losses):.4f}  検証（{len(val_examples)} 本 × {args.val_seconds:.0f} 秒）  ({time.time() - t_start:.0f}s):\n{format_scores(scores, classes)}")
         torch.save({"state_dict": model.state_dict(), "hidden": args.hidden, "classes": classes, "features": cfg.__dict__, "epoch": epoch},
                    out.with_suffix(".pt"))
         if scores[thr]["m0_1"] > best_m0:
             best_m0, best_thr = scores[thr]["m0_1"], thr
             export_onnx(model, cfg, classes, out, best_thr,
-                        {"trained_on": "E-GMD (CC BY 4.0)", "epochs": epoch, "train_tracks": len(train), "kits": len(kits),
+                        {"trained_on": "E-GMD (CC BY 4.0)" + (f" + synthetic {args.synthetic_ratio:g}" if args.synthetic_ratio else ""),
+                         "epochs": epoch, "train_tracks": len(train), "kits": len(kits), "hidden": args.hidden,
                          "bleed_files": len(bleed), "val_m0_1": best_m0, "val_scores": {str(k): v for k, v in scores.items()}, "seed": args.seed})
             model.to(device)
-            print(f"  → 検証の M0-1 が最良（{best_m0:.3f}、しきい値 {best_thr}）なので ONNX を更新", flush=True)
-    print(f"終了。最良の検証 M0-1 {best_m0:.3f}（しきい値 {best_thr}）。モデル: {out}")
+            log(f"  → 検証の M0-1 が最良（{best_m0:.3f}、しきい値 {best_thr}）なので ONNX を更新")
+    log(f"終了。最良の検証 M0-1 {best_m0:.3f}（しきい値 {best_thr}）。モデル: {out}。ログ: {log_path}")
     return 0
 
 
@@ -298,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=str(Path(__file__).resolve().parent / "models" / "crnn_synth.onnx"))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="auto", help="auto / cuda / cpu")
-    ap.add_argument("--hidden", type=int, default=48, help="GRU の隠れ層の大きさ（E-GMD では 96 程度を推奨）")
+    ap.add_argument("--hidden", type=int, default=48, help="GRU の隠れ層の大きさ（E-GMD では既定 128）")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--seconds", type=float, default=6.0, help="1 区間の長さ（秒）")
     # 合成
@@ -307,18 +298,19 @@ def main(argv: list[str] | None = None) -> int:
     # E-GMD
     ap.add_argument("--egmd", default=None, help="E-GMD のフォルダ（e-gmd-v1.0.0.csv があるところ）。指定すると E-GMD で学習する")
     ap.add_argument("--bleed-dir", default=None, help="にじみ用にドラム以外のステムを混ぜるフォルダ（任意）")
-    ap.add_argument("--epochs", type=int, default=8)
+    ap.add_argument("--epochs", type=int, default=12)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--max-tracks", type=int, default=4000, help="学習に使うトラック数の上限（0 で全部）")
     ap.add_argument("--chunks-per-track", type=int, default=2)
-    ap.add_argument("--workers", type=int, default=2, help="DataLoader のワーカー数（Windows で問題があれば 0）")
+    ap.add_argument("--workers", type=int, default=4, help="DataLoader のワーカー数（Windows で問題があれば 0）")
     ap.add_argument("--val-tracks", type=int, default=40)
     ap.add_argument("--val-seconds", type=float, default=30.0)
     ap.add_argument("--no-augment", action="store_true")
+    ap.add_argument("--synthetic-ratio", type=float, default=0.15, help="E-GMD の区間の代わりに合成音（電子系のキックを含む）を返す割合（E-GMD のとき）")
     args = ap.parse_args(argv)
     if args.egmd:
         if args.hidden == 48:
-            args.hidden = 96
+            args.hidden = 128
         if args.seconds == 6.0:
             args.seconds = 8.0
         return train_egmd(args)

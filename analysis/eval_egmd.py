@@ -32,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seconds", type=float, default=30.0)
     ap.add_argument("--threshold", type=float, default=None)
     ap.add_argument("--check-offset", action="store_true", help="音声と MIDI のずれの見積もりも出す")
+    ap.add_argument("--by-kit", action="store_true", help="キットごとの M0-1 も出す（電子系のキットが弱いかを見る）")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
@@ -50,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
 
     per_class = {c: {"p": [], "r": [], "f": []} for c in classes}
     offsets = []
+    by_kit: dict[str, list[float]] = {}
     for tr in tracks:
         x = load_audio(tr.audio, cfg.sr, 0.0, args.seconds)
         hits = [h for h in load_hits_midi(tr.midi) if h.time < x.size / cfg.sr]
@@ -60,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             per_class[c]["p"].append(s[c].precision)
             per_class[c]["r"].append(s[c].recall)
             per_class[c]["f"].append(s[c].f_measure)
+        by_kit.setdefault(tr.kit or "?", []).append(float(np.mean([s[c].f_measure for c in M0_CLASSES if c in s])))
         if args.check_offset:
             offsets.append(estimate_offset(x, cfg.sr, hits, cfg))
 
@@ -71,6 +74,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"M0-1（kick/snare/hihat の F の平均）: {m0:.3f}  目安 0.85")
     if offsets:
         print(f"音声と MIDI のずれの見積もり: 中央値 {np.median(offsets) * 1000:.1f} ms（正なら音声が遅い）")
+    if args.by_kit:
+        print("キットごとの M0-1（本数）:")
+        for kit, vals in sorted(by_kit.items(), key=lambda kv: np.mean(kv[1])):
+            print(f"  {np.mean(vals):.3f}  ({len(vals)})  {kit}")
     return 0
 
 

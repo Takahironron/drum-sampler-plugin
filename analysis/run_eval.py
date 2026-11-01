@@ -190,8 +190,20 @@ def _counts(hits: list[Hit]) -> str:
 CHOKE_POLICIES: dict[str, bool | set[str]] = {"all": True, "hihat": {"hihat"}, "none": False}
 
 
+def parse_kit_size(text: str) -> dict[str, int]:
+    """'24' か 'kick=48,snare=24,hihat=24,cymbal=24,tom=24' を 種類 → 数 にする（書いていない種類は既定）。"""
+    out = {c: 24 for c in ("kick", "snare", "hihat", "tom", "cymbal")}
+    if "=" not in text:
+        return {c: int(text) for c in out}
+    for pair in text.split(","):
+        if pair.strip():
+            k, v = pair.split("=")
+            out[k.strip()] = int(v)
+    return out
+
+
 def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song_id: str | None = None, wav: Path | None = None,
-                  model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: int = 12,
+                  model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: str = "24",
                   choke: str = "all") -> dict:
     wav = wav or find_stem(song_dir)
     x, sr = load_mono(str(wav), None)
@@ -283,7 +295,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             yb = _match_rms(render_kit(ref_v, kit_p, duration=x.size / sr, hit_levels_db=levels, gain_match=True, choke=True), x)
             row["stft_parts_gain_choke"] = multi_resolution_stft_distance(x, yb)["total"]
             # C: 特徴で選んだ代表 kit_size 音 ＋ 特徴の近い音を選ぶ ＋ 音量合わせ ＋ チョーク（方針 3 通り）
-            kit_f = build_kit_by_features(segs_p, sr, n_per_class=kit_size)
+            kit_f = build_kit_by_features(segs_p, sr, n_per_class=parse_kit_size(kit_size))
             row["kit_features"] = ", ".join(f"{c}:{kit_f.n_samples(c)}" for c in kit_f.parts)
             renders_c = {}
             for name, policy in CHOKE_POLICIES.items():
@@ -385,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--model", default=None, help="ONNX の採譜モデル（指定すると基準値の代わりに使う。onnxruntime が要る）")
     ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts_3x3 / rerender_parts / rerender_self / kit_parts_audition）を各曲のフォルダに書く")
     ap.add_argument("--threshold", type=float, default=None, help="--model の打点のしきい値（既定はモデルの設定、0.5）")
-    ap.add_argument("--kit-size", type=int, default=24, help="方式 C で種類ごとに残す代表の音の数（既定 24）")
+    ap.add_argument("--kit-size", default="24", help="方式 C で種類ごとに残す代表の音の数（既定 24）。種類別なら kick=48,snare=24,hihat=24,cymbal=24")
     ap.add_argument("--choke", choices=sorted(CHOKE_POLICIES), default="all", help="rerender_parts.wav に使うチョークの方針（表には 3 通りとも出る）")
     ap.add_argument("--only", default=None, help="曲 ID をコンマ区切りで指定すると、その曲だけ評価する（例: a01,a07）")
     args = ap.parse_args(argv)

@@ -123,14 +123,14 @@ def augment(x: np.ndarray, sr: int, rng: np.random.Generator, bleed_files: list[
     if rng.random() < 0.5:
         nyq = sr / 2
         if rng.random() < 0.5:
-            fc = rng.uniform(3000.0, min(12000.0, 0.9 * nyq))
+            fc = rng.uniform(6000.0, min(12000.0, 0.9 * nyq))  # 3 kHz まで下げるとハイハットの帯域が消えるので 6 kHz 以上
             b, a = butter(2, fc / nyq)
         else:
             fc = rng.uniform(30.0, 150.0)
             b, a = butter(2, fc / nyq, btype="high")
         y = lfilter(b, a, y)
     # にじみ: ドラム以外のステムを混ぜる
-    if bleed_files and rng.random() < 0.6:
+    if bleed_files and rng.random() < 0.5:
         path = bleed_files[int(rng.integers(len(bleed_files)))]
         try:
             info = sf.info(str(path))
@@ -142,7 +142,7 @@ def augment(x: np.ndarray, sr: int, rng: np.random.Generator, bleed_files: list[
             b_ = b_[: y.size].astype(np.float64)
             ry = np.sqrt(np.mean(y**2)) + 1e-9
             rb = np.sqrt(np.mean(b_**2)) + 1e-9
-            snr_db = rng.uniform(0.0, 18.0)
+            snr_db = rng.uniform(6.0, 24.0)
             y = y + b_ * (ry / rb) * 10 ** (-snr_db / 20)
         except (RuntimeError, sf.LibsndfileError):  # 壊れたファイルは飛ばす
             pass
@@ -173,7 +173,10 @@ class EGMDChunks:
     """
 
     def __init__(self, tracks: list[Track], cfg: FeatureConfig, chunk_sec: float = 8.0, chunks_per_track: int = 2,
-                 bleed_files: list[Path] | None = None, do_augment: bool = True, classes: tuple[str, ...] = CLASSES5, seed: int = 0):
+                 bleed_files: list[Path] | None = None, do_augment: bool = True, classes: tuple[str, ...] = CLASSES5, seed: int = 0,
+                 synthetic_ratio: float = 0.0):
+        """`synthetic_ratio`: この割合で、E-GMD の区間の代わりに合成音（`drumeval.synth`、電子系のキックを含む）の区間を返す。"""
+        self.synthetic_ratio = synthetic_ratio
         self.tracks = tracks
         self.cfg = cfg
         self.chunk_sec = chunk_sec
@@ -200,13 +203,20 @@ class EGMDChunks:
         import torch
 
         rng = np.random.default_rng((self.seed * 1_000_003 + self.epoch * 7_919 + i) % (2**32))
-        tr = self.tracks[i % len(self.tracks)]
-        dur = tr.duration or sf.info(str(tr.audio)).duration
-        start = float(rng.uniform(0.0, max(dur - self.chunk_sec, 0.0)))
-        x = load_audio(tr.audio, self.cfg.sr, start, self.chunk_sec)
         n = int(self.chunk_sec * self.cfg.sr)
-        x = np.pad(x, (0, max(n - x.size, 0)))[:n]
-        hits = [Hit(h.time - start, h.cls, h.velocity) for h in self.hits_of(tr) if 0.0 <= h.time - start < self.chunk_sec]
+        if self.synthetic_ratio > 0 and rng.random() < self.synthetic_ratio:
+            from .synth import random_pattern, render
+
+            hits = random_pattern(rng, self.chunk_sec)
+            x = render(hits, sr=self.cfg.sr, duration=self.chunk_sec, seed=int(rng.integers(1 << 30)), variation=float(rng.uniform(0.5, 1.0)))
+            x = np.asarray(x, dtype=np.float32)[:n]
+        else:
+            tr = self.tracks[i % len(self.tracks)]
+            dur = tr.duration or sf.info(str(tr.audio)).duration
+            start = float(rng.uniform(0.0, max(dur - self.chunk_sec, 0.0)))
+            x = load_audio(tr.audio, self.cfg.sr, start, self.chunk_sec)
+            x = np.pad(x, (0, max(n - x.size, 0)))[:n]
+            hits = [Hit(h.time - start, h.cls, h.velocity) for h in self.hits_of(tr) if 0.0 <= h.time - start < self.chunk_sec]
         if self.do_augment:
             x = augment(x, self.cfg.sr, rng, self.bleed_files)
         feat = log_mel(x, self.cfg)
