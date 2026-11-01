@@ -300,7 +300,7 @@ def render_kit(
     hit_levels_db: list[float | None] | None = None,
     hit_features: list[np.ndarray | None] | None = None,
     gain_match: bool = False,
-    choke: bool = False,
+    choke: bool | set[str] = False,
     max_gain_db: float = 12.0,
 ) -> np.ndarray:
     """打点ラベルをキットで鳴らす。
@@ -308,7 +308,8 @@ def render_kit(
     - 音の選び方: `hit_features` があれば（特徴の入ったキットで）最も近い音。無ければ強さの層とラウンドロビン。
       強さが無い打は最も強い層を使う。
     - `gain_match`: `hit_levels_db`（その打の元のピーク dB）に合わせて音量を調整する（±max_gain_db まで）。
-    - `choke`: 同じ種類の次の打が来たら前の音を 5 ms で止める（シンバルは止めない）。
+    - `choke`: 同じ種類の次の打が来たら前の音を 5 ms で止める。True なら `CHOKE_CLASSES`（シンバル以外）、
+      種類の集合（例: {"hihat"}）ならその種類だけ、False なら止めない。
     `hit_levels_db`／`hit_features` は `hits` と同じ順の並び。
     """
     sr = kit.sr
@@ -328,6 +329,7 @@ def render_kit(
             next_same[last_of_cls[c]] = hits[i].time
         last_of_cls[c] = i
     fade = max(int(0.005 * sr), 1)
+    choke_set: set[str] = CHOKE_CLASSES if choke is True else (choke if isinstance(choke, set) else set())
 
     for i in order:
         h = hits[i]
@@ -357,7 +359,7 @@ def render_kit(
         if start >= n:
             continue
         length = min(s.size, n - start)
-        if choke and cls in CHOKE_CLASSES and i in next_same:
+        if cls in choke_set and i in next_same:
             limit = int((next_same[i] - h.time) * sr) + fade
             length = min(length, max(limit, fade))
         seg = s[:length] * g

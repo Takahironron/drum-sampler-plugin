@@ -4,7 +4,7 @@
 使い方::
 
     python run_eval.py data/stems [--out data/results/YYYY-MM-DD.md] [--est-dir 推定の置き場] [--max-seconds 60]
-                       [--model analysis/models/crnn_synth_v0.onnx] [--render]
+                       [--model analysis/models/crnn_synth_v0.onnx] [--render] [--kit-size 12] [--choke all|hihat|none] [--only a01,a07]
 
 各曲のフォルダ:
     drums.wav | .flac    分離済みのドラムのステム（必須。フォルダ内の音声ファイルが 1 つなら名前は問わない）
@@ -162,8 +162,12 @@ def _counts(hits: list[Hit]) -> str:
     return " ".join(f"{k[:2]}{c[k]}" for k in ("kick", "snare", "hihat", "tom", "cymbal") if c.get(k))
 
 
+CHOKE_POLICIES: dict[str, bool | set[str]] = {"all": True, "hihat": {"hihat"}, "none": False}
+
+
 def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song_id: str | None = None, wav: Path | None = None,
-                  model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: int = 12) -> dict:
+                  model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: int = 12,
+                  choke: str = "all") -> dict:
     wav = wav or find_stem(song_dir)
     x, sr = load_mono(str(wav), None)
     if max_seconds and x.size > max_seconds * sr:
@@ -253,11 +257,16 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             # B: 3 層 × 3 音 ＋ 打ごとの音量合わせ ＋ チョーク
             yb = _match_rms(render_kit(ref_v, kit_p, duration=x.size / sr, hit_levels_db=levels, gain_match=True, choke=True), x)
             row["stft_parts_gain_choke"] = multi_resolution_stft_distance(x, yb)["total"]
-            # C: 特徴で選んだ代表 kit_size 音 ＋ 特徴の近い音を選ぶ ＋ 音量合わせ ＋ チョーク
+            # C: 特徴で選んだ代表 kit_size 音 ＋ 特徴の近い音を選ぶ ＋ 音量合わせ ＋ チョーク（方針 3 通り）
             kit_f = build_kit_by_features(segs_p, sr, n_per_class=kit_size)
-            yc = _match_rms(render_kit(ref_v, kit_f, duration=x.size / sr, hit_levels_db=levels, hit_features=feats, gain_match=True, choke=True), x)
-            row["stft_parts_features"] = multi_resolution_stft_distance(x, yc)["total"]
             row["kit_features"] = ", ".join(f"{c}:{kit_f.n_samples(c)}" for c in kit_f.parts)
+            renders_c = {}
+            for name, policy in CHOKE_POLICIES.items():
+                y_ = _match_rms(render_kit(ref_v, kit_f, duration=x.size / sr, hit_levels_db=levels, hit_features=feats, gain_match=True, choke=policy), x)
+                renders_c[name] = y_
+                row[f"stft_parts_features_{name}"] = multi_resolution_stft_distance(x, y_)["total"]
+            row["stft_parts_features"] = row[f"stft_parts_features_{choke}"]
+            yc = renders_c[choke]
             if render:
                 import soundfile as sf
 
@@ -275,10 +284,11 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
 def to_markdown(rows: list[dict], title: str) -> str:
     cols = ("id", "seconds", "est_source", "truth", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
             "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_gain_choke",
-            "kit_features", "stft_parts_features", "stft_self", "stft_parts_sum")
+            "kit_features", "stft_parts_features_all", "stft_parts_features_hihat", "stft_parts_features_none", "stft_self", "stft_parts_sum")
     heads = ("曲ID", "秒", "推定", "正解の種類", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
              "重ならない打（混合）", "層/音（混合）", "STFT（混合）", "重ならない打（パート別）", "層/音（パート別 3層×3音）", "STFT（A: 3層×3音）",
-             "STFT（B: A＋音量合わせ＋チョーク）", "音の数（C: 特徴で選ぶ）", "STFT（C: 特徴＋音量合わせ＋チョーク）", "STFT（自己再現）", "パートの和 vs 元")
+             "STFT（B: A＋音量合わせ＋チョーク）", "音の数（C: 特徴で選ぶ）", "STFT（C: チョーク全部）", "STFT（C: ハイハットだけ）", "STFT（C: チョーク無し）",
+             "STFT（自己再現）", "パートの和 vs 元")
     lines = [f"# {title}", "", "| " + " | ".join(heads) + " |", "|" + "---|" * len(heads)]
     def f(v):
         return "" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
@@ -298,7 +308,9 @@ def to_markdown(rows: list[dict], title: str) -> str:
     if dp:
         lines.append(f"- 再現との STFT 距離の平均（パート別ステムから切り出し、{len(dp)} 曲）: A（3層×3音）{np.mean(dp):.3f}、"
                      f"B（A＋音量合わせ＋チョーク）{np.mean([r['stft_parts_gain_choke'] for r in rows if 'stft_parts_gain_choke' in r]):.3f}、"
-                     f"C（特徴で選ぶ代表音＋音量合わせ＋チョーク）{np.mean([r['stft_parts_features'] for r in rows if 'stft_parts_features' in r]):.3f}")
+                     f"C（特徴で選ぶ代表音＋音量合わせ＋チョーク）{np.mean([r['stft_parts_features_all'] for r in rows if 'stft_parts_features_all' in r]):.3f}、"
+                     f"C でチョークをハイハットだけ {np.mean([r['stft_parts_features_hihat'] for r in rows if 'stft_parts_features_hihat' in r]):.3f}、"
+                     f"C でチョーク無し {np.mean([r['stft_parts_features_none'] for r in rows if 'stft_parts_features_none' in r]):.3f}")
     lines.append("- 「種類別」の打数は ki=kick、sn=snare、hi=hihat、to=tom、cy=cymbal。")
     lines.append("- STFT 距離は、比べる音の RMS を元に合わせてから測る（全体の音量差は見ない）。")
     ds = [r["stft_self"] for r in rows if "stft_self" in r]
@@ -319,6 +331,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts_3x3 / rerender_parts / rerender_self / kit_parts_audition）を各曲のフォルダに書く")
     ap.add_argument("--threshold", type=float, default=None, help="--model の打点のしきい値（既定はモデルの設定、0.5）")
     ap.add_argument("--kit-size", type=int, default=12, help="方式 C で種類ごとに残す代表の音の数")
+    ap.add_argument("--choke", choices=sorted(CHOKE_POLICIES), default="all", help="rerender_parts.wav に使うチョークの方針（表には 3 通りとも出る）")
+    ap.add_argument("--only", default=None, help="曲 ID をコンマ区切りで指定すると、その曲だけ評価する（例: a01,a07）")
     args = ap.parse_args(argv)
 
     stems_dir = Path(args.stems_dir)
@@ -326,6 +340,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"フォルダが無い: {stems_dir.resolve()}", file=sys.stderr)
         return 1
     songs = list_songs(stems_dir)
+    if args.only:
+        wanted = {w.strip() for w in args.only.split(",") if w.strip()}
+        songs = [s_ for s_ in songs if s_[0] in wanted]
     if not songs:
         print(f"音声ファイルが見つからない: {stems_dir.resolve()}", file=sys.stderr)
         print("  期待する形: data/stems/a01/drums.wav（フォルダ内の音声が 1 つなら名前は問わない）か、data/stems/a01.wav", file=sys.stderr)
@@ -336,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     for song_id, d, f in songs:
         est = Path(args.est_dir) / f"{song_id}.csv" if args.est_dir else None
         print(f"{song_id} ({f.name}) ...", file=sys.stderr)
-        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold, kit_size=args.kit_size))
+        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
