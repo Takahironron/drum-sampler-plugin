@@ -59,13 +59,14 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 ## 3. 学習
 
 ```
-python analysis\train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\stems --out analysis\models\crnn_egmd_v3.onnx
+python analysis\train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\stems --out analysis\models\crnn_egmd_v4.onnx
 ```
 
-- 既定（v3 から）: 学習トラック 4,000 本（乱数で選ぶ。キットが散る）、1 本から 8 秒の区間を 2 つ、バッチ 8、96 メル帯域・周波数方向の縮小 1 回、GRU 128、OneCycle、16 エポック、合成音の混ぜ込み 15%、検証 80 本、ワーカー 4。1 エポック 1,000 ステップ（約 12 分）。種類ごとのしきい値を検証で選んで ONNX の設定に保存する。
-- これまで: v1（64 メル、GRU 96、8 エポック、混ぜ込み無し）E-GMD test M0-1 0.70、v2（64 メル、GRU 128、12 エポック、混ぜ込み 15%）0.74、v3（96 メル、縮小 1 回、16 エポック）0.715（`結果/` を見る）。**v3 の変更は効かなかったので、次は `--n-mels 64 --pools 2` で v2 の設定に戻す。**
+- 既定（v4 から）: 学習トラック 8,000 本（乱数で選ぶ。キットが散る）、1 本から 8 秒の区間を 2 つ、バッチ 8、64 メル帯域・周波数方向の縮小 2 回、対数メルの時間差分のチャンネル、GRU 128、OneCycle、16 エポック、合成音の混ぜ込み 15%、検証 80 本、ワーカー 4。1 エポック 2,000 ステップ（約 25〜35 分、16 エポックで 7〜9 時間。夜に回す）。種類ごとのしきい値（0.3〜0.8）を検証で選んで ONNX の設定に保存する。
+- 時間を短くするなら `--max-tracks 4000`（v2 と同じ量、約 4 時間）。
+- これまで: v1（64 メル、GRU 96、8 エポック、混ぜ込み無し）E-GMD test M0-1 0.70、v2（64 メル、GRU 128、12 エポック、混ぜ込み 15%）0.74、v3（96 メル、縮小 1 回、16 エポック）0.715（`結果/` を見る）。v3 の変更は効かなかったので、v4 は v2 の設定に戻し、時間差分のチャンネルと種類別しきい値（0.8 まで）、学習データ 8,000 本を足した。
 - 診断: `python analysis\eval_egmd.py <model> D:\data\e-gmd-v1.0.0 --split test --max-tracks 60 --diagnose --sweep` で、取りこぼし（小さい打か、キック・スネアと同時の打か）と誤検出（他の種類との混同か）の内訳、しきい値 0.3〜0.8 の F が出る。
-- エポックごとの検証の結果は `analysis\models\crnn_egmd_v3.log.txt` に残る（これを貼ればよい）。
+- エポックごとの検証の結果は `analysis\models\crnn_egmd_v4.log.txt` に残る（これを貼ればよい）。
 - `--bleed-dir data\stems` は、区分 A のドラム以外のステム（ギター・ベース・ピアノ・ボーカル・その他）を「分離の残り」として混ぜる増強。ドラム系の名前のファイルは自動で除く。**CD 曲のステムを混ぜたモデルは評価用に限る**（製品のモデルは権利の明確な音だけで作る。R3）。
 - 毎エポック、validation 分割 40 本 × 30 秒で種類ごとの F 値を出し、しきい値 0.3／0.4／0.5 のうち M0-1 が最も高いものを記録する。最良のエポックの ONNX が `--out` に残る（チェックポイントは `.pt`）。
 - 時間の目安: 特徴量の計算が CPU なので、1 エポック 5〜15 分程度（ワーカー 2）。`--workers 4` で速くなることがある。DataLoader で止まるときは `--workers 0`。
@@ -77,7 +78,7 @@ python analysis\train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir dat
 E-GMD の test 分割（正解は MIDI なので本当の F 値。ただし電子ドラムの音に対して）:
 
 ```
-python analysis\eval_egmd.py analysis\models\crnn_egmd_v3.onnx D:\data\e-gmd-v1.0.0 --split test --max-tracks 60 --by-kit
+python analysis\eval_egmd.py analysis\models\crnn_egmd_v4.onnx D:\data\e-gmd-v1.0.0 --split test --max-tracks 60 --by-kit --diagnose --sweep
 ```
 
 `--by-kit` でキットごとの M0-1 も出る（電子系のキットが弱いかを見る）。
@@ -85,7 +86,7 @@ python analysis\eval_egmd.py analysis\models\crnn_egmd_v3.onnx D:\data\e-gmd-v1.
 区分 A の実ステム（疑似正解に対する目安）:
 
 ```
-python analysis\run_eval.py data\stems --model analysis\models\crnn_egmd_v3.onnx --render --out data\results\YYYY-MM-DD_egmd_v3.md
+python analysis\run_eval.py data\stems --model analysis\models\crnn_egmd_v4.onnx --render --out data\results\YYYY-MM-DD_egmd_v4.md
 ```
 
 出てきた数字（E-GMD test の M0-1、区分 A の M0-1）を貼ってもらえれば、`docs/phase0/結果/` に記録する。M0-1 の目安は 0.85。

@@ -50,7 +50,7 @@ def _diagnose(ref, est, diag: dict, tol: float = 0.05) -> None:
             if best_j is not None:
                 used.add(best_j)
                 matched_ref.add(i)
-        others = [h for k, hs in ref_by.items() if k in ("kick", "snare") for h in hs]
+        others = [h for k, hs in ref_by.items() if k in ("kick", "snare") and k != c for h in hs]
         for i, h in enumerate(r):
             if i in matched_ref:
                 continue
