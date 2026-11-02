@@ -78,8 +78,12 @@ def find_part_stems(song_dir: Path) -> dict[str, Path]:
     return out
 
 
-def detect_drum_start(x: np.ndarray, sr: int, win_sec: float = 1.0, rel_db: float = -25.0, hold: int = 3) -> float:
-    """ドラムが鳴り始める位置（秒）。1 秒窓の RMS が最大から rel_db 以内に `hold` 窓続けて入る最初の窓。見つからなければ 0。"""
+def detect_drum_start(x: np.ndarray, sr: int, win_sec: float = 1.0, rel_db: float = -15.0, hold: int = 3) -> float:
+    """ドラムが鳴り始める位置（秒）。1 秒窓の RMS が最大から rel_db 以内に `hold` 窓続けて入る最初の窓。見つからなければ 0。
+
+    混ざったドラムのステムには他の楽器の残りが入るので、できればキックとスネアのパート別ステムの合計を渡す（`evaluate_song` が行う）。
+    確実なのは曲フォルダの `start.txt`。
+    """
     n = int(win_sec * sr)
     if x.size < n * (hold + 1):
         return 0.0
@@ -237,10 +241,20 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
                   choke: str = "all", start_sec: float | None = None) -> dict:
     wav = wav or find_stem(song_dir)
     x_full, sr = load_mono(str(wav), None)
-    # 評価の開始位置: start.txt → --start → ドラムが鳴り始める位置の自動検出
+    # 評価の開始位置: start.txt → --start → ドラムが鳴り始める位置の自動検出（キックとスネアのパート別ステムがあればその合計で）
     start = read_start_override(song_dir)
     if start is None:
-        start = start_sec if start_sec is not None else detect_drum_start(x_full, sr)
+        if start_sec is not None:
+            start = start_sec
+        else:
+            parts_for_start = find_part_stems(song_dir)
+            probe = x_full
+            if "kick" in parts_for_start and "snare" in parts_for_start:
+                k, ksr = load_mono(str(parts_for_start["kick"]), sr)
+                s_, _ = load_mono(str(parts_for_start["snare"]), sr)
+                n = min(k.size, s_.size)
+                probe = k[:n] + s_[:n]
+            start = detect_drum_start(probe, sr)
     x = x_full[int(start * sr) :]
     if max_seconds and x.size > max_seconds * sr:
         x = x[: int(max_seconds * sr)]
