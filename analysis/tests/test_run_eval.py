@@ -63,3 +63,14 @@ def test_pseudo_truth_from_part_stems(tmp_path):
     s = transcription_scores(ref, pseudo)
     for c in ("kick", "snare", "hihat"):
         assert s[c].f_measure >= 0.95, (c, s[c])
+
+
+def test_detect_drum_start_skips_silent_intro():
+    from run_eval import detect_drum_start
+
+    sr = 22050
+    rng = np.random.default_rng(0)
+    x = np.concatenate([rng.standard_normal(sr * 8) * 1e-4, render(_sparse_pattern(6), sr=sr)])  # 8 秒の無音（微小雑音）の後にドラム
+    start = detect_drum_start(x, sr)
+    assert 7.0 <= start <= 9.0
+    assert detect_drum_start(render(_sparse_pattern(4), sr=sr), sr) == 0.0

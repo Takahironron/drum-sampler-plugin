@@ -78,11 +78,28 @@ def find_part_stems(song_dir: Path) -> dict[str, Path]:
     return out
 
 
-def pseudo_truth_from_parts(parts: dict[str, Path], max_seconds: float, sr_target: int | None) -> list[Hit]:
-    """パート別ステムの打点検出を「疑似的な正解」にする。分離の誤りはそのまま残るので目安。"""
+def detect_drum_start(x: np.ndarray, sr: int, win_sec: float = 1.0, rel_db: float = -25.0, hold: int = 3) -> float:
+    """ドラムが鳴り始める位置（秒）。1 秒窓の RMS が最大から rel_db 以内に `hold` 窓続けて入る最初の窓。見つからなければ 0。"""
+    n = int(win_sec * sr)
+    if x.size < n * (hold + 1):
+        return 0.0
+    k = x.size // n
+    rms = np.sqrt(np.mean(x[: k * n].reshape(k, n) ** 2, axis=1) + 1e-12)
+    db = 20.0 * np.log10(rms)
+    thr = db.max() + rel_db
+    above = db > thr
+    for i in range(k - hold + 1):
+        if above[i : i + hold].all():
+            return i * win_sec
+    return 0.0
+
+
+def pseudo_truth_from_parts(parts: dict[str, Path], max_seconds: float, sr_target: int | None, start_sec: float = 0.0) -> list[Hit]:
+    """パート別ステムの打点検出を「疑似的な正解」にする。分離の誤りはそのまま残るので目安。時刻は start_sec からの相対。"""
     hits: list[Hit] = []
     for cls, path in parts.items():
         x, sr = load_mono(str(path), sr_target)
+        x = x[int(start_sec * sr) :]
         if max_seconds and x.size > max_seconds * sr:
             x = x[: int(max_seconds * sr)]
         for t in onsets_from_part(x, sr):
@@ -204,14 +221,30 @@ def parse_kit_size(text: str) -> dict[str, int]:
     return out
 
 
+def read_start_override(song_dir: Path) -> float | None:
+    """曲フォルダの `start.txt`（秒を 1 つ書く）があれば、その位置から評価する。"""
+    p = song_dir / "start.txt"
+    if p.exists():
+        try:
+            return float(p.read_text(encoding="utf-8").strip())
+        except ValueError:
+            return None
+    return None
+
+
 def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song_id: str | None = None, wav: Path | None = None,
                   model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: str = "24",
-                  choke: str = "all") -> dict:
+                  choke: str = "all", start_sec: float | None = None) -> dict:
     wav = wav or find_stem(song_dir)
-    x, sr = load_mono(str(wav), None)
+    x_full, sr = load_mono(str(wav), None)
+    # 評価の開始位置: start.txt → --start → ドラムが鳴り始める位置の自動検出
+    start = read_start_override(song_dir)
+    if start is None:
+        start = start_sec if start_sec is not None else detect_drum_start(x_full, sr)
+    x = x_full[int(start * sr) :]
     if max_seconds and x.size > max_seconds * sr:
         x = x[: int(max_seconds * sr)]
-    row: dict = {"id": song_id or song_dir.name, "seconds": x.size / sr}
+    row: dict = {"id": song_id or song_dir.name, "start": start, "seconds": x.size / sr}
 
     if est_csv and est_csv.exists():
         est = load_hits(est_csv)
@@ -234,7 +267,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
         ref = [h for h in load_hits(truth_path) if h.time < x.size / sr]
         row["truth"] = "正解"
     elif all(c in parts for c in M0_CLASSES):
-        ref = pseudo_truth_from_parts(parts, x.size / sr, sr)  # シンバル・タムのステムがあればそれも含める
+        ref = pseudo_truth_from_parts(parts, x.size / sr, sr, start)  # シンバル・タムのステムがあればそれも含める
         row["truth"] = "疑似（パート別ステム）"
         from drumeval import save_hits_csv
 
@@ -267,6 +300,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
         part_audio: dict[str, tuple[np.ndarray, int]] = {}
         for c, path in parts.items():
             px, psr = load_mono(str(path), sr)
+            px = px[int(start * psr) :]
             part_audio[c] = (px[: x.size], psr)
         ref_v: list[Hit] = []
         for c, (px, psr) in part_audio.items():
@@ -364,11 +398,11 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
 
 
 def to_markdown(rows: list[dict], title: str) -> str:
-    cols = ("id", "seconds", "est_source", "truth", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
+    cols = ("id", "start", "seconds", "est_source", "truth", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
             "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_gain_choke",
             "kit_features", "stft_parts_features_all", "stft_parts_features_hihat", "stft_parts_features_none", "stft_parts_ceiling",
             "stft_parts_embed", "stft_parts_embed_ceiling", "loss_shares", "stft_self", "stft_parts_sum")
-    heads = ("曲ID", "秒", "推定", "正解の種類", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
+    heads = ("曲ID", "開始秒", "秒", "推定", "正解の種類", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
              "重ならない打（混合）", "層/音（混合）", "STFT（混合）", "重ならない打（パート別）", "層/音（パート別 3層×3音）", "STFT（A: 3層×3音）",
              "STFT（B: A＋音量合わせ＋チョーク）", "音の数（C: 特徴で選ぶ）", "STFT（C: チョーク全部）", "STFT（C: ハイハットだけ）", "STFT（C: チョーク無し）",
              "STFT（上限: 全部を代表・自分以外）", "STFT（D: 埋め込みで選ぶ）", "STFT（D の上限）",
@@ -400,6 +434,8 @@ def to_markdown(rows: list[dict], title: str) -> str:
                      f"D の上限 {np.mean([r['stft_parts_embed_ceiling'] for r in rows if 'stft_parts_embed_ceiling' in r]):.3f}")
         lines.append("- 方式 C は、特徴（音量・減衰・明るさ・帯域のエネルギー）で代表を選び、選んだ音の立ち上がりを元に相互相関で合わせて置く。"
                      "方式 D は、先頭 0.25 秒の対数メル（埋め込み）で代表を選ぶ。WAV は rerender_parts.wav（C）と rerender_parts_embed.wav（D）。")
+    lines.append("- 「開始秒」は評価に使った区間の始まり（ドラムが鳴り始める位置を自動で検出。曲フォルダの start.txt か --start で上書き）。"
+                 "hits_pseudo.csv／.mid と各 WAV の時刻はこの位置からの相対。")
     lines.append("- 「種類別」の打数は ki=kick、sn=snare、hi=hihat、to=tom、cy=cymbal。")
     worst = [(r["id"], r["worst_windows"]) for r in rows if r.get("worst_windows")]
     if worst:
@@ -422,7 +458,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("stems_dir")
     ap.add_argument("--out", default=None, help="Markdown の出力先。省略時は標準出力")
     ap.add_argument("--est-dir", default=None, help="採譜の推定 CSV（<曲ID>.csv）の置き場")
-    ap.add_argument("--max-seconds", type=float, default=60.0, help="曲の先頭から使う長さ（0 で全部）")
+    ap.add_argument("--max-seconds", type=float, default=60.0, help="評価に使う長さ（秒。0 で全部）")
+    ap.add_argument("--start", type=float, default=None, help="評価の開始位置（秒）。省略時はドラムが鳴り始める位置を自動で検出。曲ごとに変えるなら曲フォルダに start.txt")
     ap.add_argument("--model", default=None, help="ONNX の採譜モデル（指定すると基準値の代わりに使う。onnxruntime が要る）")
     ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts_3x3 / rerender_parts / rerender_self / kit_parts_audition）を各曲のフォルダに書く")
     ap.add_argument("--threshold", type=float, default=None, help="--model の打点のしきい値（既定はモデルの設定、0.5）")
@@ -449,7 +486,7 @@ def main(argv: list[str] | None = None) -> int:
     for song_id, d, f in songs:
         est = Path(args.est_dir) / f"{song_id}.csv" if args.est_dir else None
         print(f"{song_id} ({f.name}) ...", file=sys.stderr)
-        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke))
+        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke, start_sec=args.start))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
