@@ -238,7 +238,7 @@ def read_start_override(song_dir: Path) -> float | None:
 
 def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song_id: str | None = None, wav: Path | None = None,
                   model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: str = "24",
-                  choke: str = "all", start_sec: float | None = None) -> dict:
+                  choke: str = "all", start_sec: float | None = None, fit_fx: bool = False, fit_seconds: float = 20.0) -> dict:
     wav = wav or find_stem(song_dir)
     x_full, sr = load_mono(str(wav), None)
     # 評価の開始位置: start.txt → --start → ドラムが鳴り始める位置の自動検出（キックとスネアのパート別ステムがあればその合計で）
@@ -374,6 +374,23 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
                 import soundfile as sf
 
                 sf.write(song_dir / "rerender_parts_embed.wav", (yd / (np.max(np.abs(yd)) + 1e-9) * 0.9).astype(np.float32), sr)
+            # M0-3 を実ステムで: 疑似正解の打点を合成の汎用キットで鳴らした音を「乾いた音」とし、固定チェーンを元のステムに当てはめる
+            if fit_fx:
+                from drumeval.fx import apply_chain, fit_chain
+                from drumeval.synth import render as render_synth
+
+                dry = render_synth(ref_v, sr=sr, duration=x.size / sr, variation=0.0)
+                params, log = fit_chain(dry, x, sr, max_seconds=fit_seconds, maxiter=3)
+                wet = apply_chain(dry, sr, params)
+                row["fx_before"] = multi_resolution_stft_distance(x, _match_rms(dry, x))["total"]
+                row["fx_after"] = multi_resolution_stft_distance(x, _match_rms(wet, x))["total"]
+                row["fx_params"] = (f"gain {params.gain_db:+.1f}dB low {params.low_shelf_db:+.1f} peak {params.peak_hz:.0f}Hz{params.peak_db:+.1f} "
+                                    f"high {params.high_shelf_db:+.1f} rt60 {params.reverb_rt60:.2f}s mix {params.reverb_mix:.2f}")
+                if render:
+                    import soundfile as sf
+
+                    sf.write(song_dir / "synthkit_dry.wav", (dry / (np.max(np.abs(dry)) + 1e-9) * 0.9).astype(np.float32), sr)
+                    sf.write(song_dir / "synthkit_fx.wav", (wet / (np.max(np.abs(wet)) + 1e-9) * 0.9).astype(np.float32), sr)
             # 時間軸の診断: どの区間で C が悪いか、そこで自己再現も悪いか（打点側の問題か、代表音の不足か）
             tl = timeline(x, {"self": ys, "C": yc}, ref_v, sr)
             worst = sorted(tl, key=lambda r: -r["C"])[:5]
@@ -415,12 +432,13 @@ def to_markdown(rows: list[dict], title: str) -> str:
     cols = ("id", "start", "seconds", "est_source", "truth", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
             "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_gain_choke",
             "kit_features", "stft_parts_features_all", "stft_parts_features_hihat", "stft_parts_features_none", "stft_parts_ceiling",
-            "stft_parts_embed", "stft_parts_embed_ceiling", "loss_shares", "stft_self", "stft_parts_sum")
+            "stft_parts_embed", "stft_parts_embed_ceiling", "loss_shares", "stft_self", "stft_parts_sum", "fx_before", "fx_after", "fx_params")
     heads = ("曲ID", "開始秒", "秒", "推定", "正解の種類", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
              "重ならない打（混合）", "層/音（混合）", "STFT（混合）", "重ならない打（パート別）", "層/音（パート別 3層×3音）", "STFT（A: 3層×3音）",
              "STFT（B: A＋音量合わせ＋チョーク）", "音の数（C: 特徴で選ぶ）", "STFT（C: チョーク全部）", "STFT（C: ハイハットだけ）", "STFT（C: チョーク無し）",
              "STFT（上限: 全部を代表・自分以外）", "STFT（D: 埋め込みで選ぶ）", "STFT（D の上限）",
-             "C の損失の内訳（種類を自己再現に置き換えたときの下がり幅）", "STFT（自己再現）", "パートの和 vs 元")
+             "C の損失の内訳（種類を自己再現に置き換えたときの下がり幅）", "STFT（自己再現）", "パートの和 vs 元",
+             "FX 当てはめ前（合成キット vs 元）", "FX 当てはめ後", "当てはめたパラメータ")
     lines = [f"# {title}", "", "| " + " | ".join(heads) + " |", "|" + "---|" * len(heads)]
     def f(v):
         return "" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
@@ -448,6 +466,10 @@ def to_markdown(rows: list[dict], title: str) -> str:
                      f"D の上限 {np.mean([r['stft_parts_embed_ceiling'] for r in rows if 'stft_parts_embed_ceiling' in r]):.3f}")
         lines.append("- 方式 C は、特徴（音量・減衰・明るさ・帯域のエネルギー）で代表を選び、選んだ音の立ち上がりを元に相互相関で合わせて置く。"
                      "方式 D は、先頭 0.25 秒の対数メル（埋め込み）で代表を選ぶ。WAV は rerender_parts.wav（C）と rerender_parts_embed.wav（D）。")
+    fx = [(r["fx_before"], r["fx_after"]) for r in rows if "fx_after" in r]
+    if fx:
+        lines.append(f"- M0-3（実ステム）: 合成の汎用キットで鳴らした乾いた音に、固定チェーン（ゲイン・3 バンド EQ・リバーブ）を元のステムへ当てはめた距離の平均 "
+                     f"{np.mean([b for b, _ in fx]):.3f} → {np.mean([a for _, a in fx]):.3f}（{len(fx)} 曲）。WAV は synthkit_dry.wav と synthkit_fx.wav。")
     lines.append("- 「開始秒」は評価に使った区間の始まり（ドラムが鳴り始める位置を自動で検出。曲フォルダの start.txt か --start で上書き）。"
                  "hits_pseudo.csv／.mid と各 WAV の時刻はこの位置からの相対。")
     lines.append("- 「種類別」の打数は ki=kick、sn=snare、hi=hihat、to=tom、cy=cymbal。")
@@ -480,6 +502,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--kit-size", default="24", help="方式 C で種類ごとに残す代表の音の数（既定 24）。種類別なら kick=48,snare=24,hihat=24,cymbal=24")
     ap.add_argument("--choke", choices=sorted(CHOKE_POLICIES), default="all", help="rerender_parts.wav に使うチョークの方針（表には 3 通りとも出る）")
     ap.add_argument("--only", default=None, help="曲 ID をコンマ区切りで指定すると、その曲だけ評価する（例: a01,a07）")
+    ap.add_argument("--fit-fx", action="store_true", help="M0-3 を実ステムで測る: 合成キットの乾いた音に固定チェーンを当てはめ、前後の距離を出す（1 曲 2〜3 分）")
+    ap.add_argument("--fit-seconds", type=float, default=20.0, help="当てはめに使う長さ（秒）")
     args = ap.parse_args(argv)
 
     stems_dir = Path(args.stems_dir)
@@ -500,7 +524,8 @@ def main(argv: list[str] | None = None) -> int:
     for song_id, d, f in songs:
         est = Path(args.est_dir) / f"{song_id}.csv" if args.est_dir else None
         print(f"{song_id} ({f.name}) ...", file=sys.stderr)
-        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke, start_sec=args.start))
+        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke, start_sec=args.start,
+                                  fit_fx=args.fit_fx, fit_seconds=args.fit_seconds))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
