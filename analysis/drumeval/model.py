@@ -14,16 +14,17 @@ class DrumCRNN(nn.Module):
     """`pools`: 周波数方向に半分にする回数（1 か 2）。`delta`: 対数メルの時間差分（正の部分 = 立ち上がり）を 2 つ目の
     チャンネルとしてモデルの中で作る。小さい打の立ち上がりを拾いやすくする。ONNX の入力は対数メルのままで変わらない。"""
 
-    def __init__(self, n_mels: int = 64, n_classes: int = 3, hidden: int = 48, pools: int = 2, delta: bool = False):
+    def __init__(self, n_mels: int = 64, n_classes: int = 3, hidden: int = 48, pools: int = 2, delta: bool = False, layers: int = 1):
         super().__init__()
         self.delta = delta
         in_ch = 2 if delta else 1
-        layers: list[nn.Module] = [nn.Conv2d(in_ch, 16, 3, padding=1), nn.BatchNorm2d(16), nn.ReLU()]
+        convs: list[nn.Module] = [nn.Conv2d(in_ch, 16, 3, padding=1), nn.BatchNorm2d(16), nn.ReLU()]
         if pools >= 2:
-            layers.append(nn.MaxPool2d((1, 2)))  # 周波数方向だけ半分に
-        layers += [nn.Conv2d(16, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d((1, 2))]
-        self.conv = nn.Sequential(*layers)
-        self.rnn = nn.GRU(32 * (n_mels // (2 ** max(pools, 1))), hidden, batch_first=True, bidirectional=True)
+            convs.append(nn.MaxPool2d((1, 2)))  # 周波数方向だけ半分に
+        convs += [nn.Conv2d(16, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d((1, 2))]
+        self.conv = nn.Sequential(*convs)
+        self.rnn = nn.GRU(32 * (n_mels // (2 ** max(pools, 1))), hidden, num_layers=layers, batch_first=True, bidirectional=True,
+                          dropout=0.2 if layers > 1 else 0.0)
         self.out = nn.Linear(2 * hidden, n_classes)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

@@ -245,26 +245,45 @@ def train_egmd(args) -> int:
                     do_augment=not args.no_augment, classes=classes, seed=args.seed, synthetic_ratio=args.synthetic_ratio)
     dl = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=args.workers, drop_last=True,
                     persistent_workers=args.workers > 0)
-    model = DrumCRNN(cfg.n_mels, len(classes), hidden=args.hidden, pools=args.pools, delta=not args.no_delta).to(device)
+    model = DrumCRNN(cfg.n_mels, len(classes), hidden=args.hidden, pools=args.pools, delta=not args.no_delta, layers=args.layers).to(device)
+    # 重みの移動平均（EMA）。エポック間の揺れを抑え、検証と test の差を小さくする
+    import copy
+
+    ema = copy.deepcopy(model).eval()
+    for p_ in ema.parameters():
+        p_.requires_grad_(False)
+    ema_decay = args.ema
+
+    def update_ema() -> None:
+        with torch.no_grad():
+            for pe, pm in zip(ema.parameters(), model.parameters()):
+                pe.mul_(ema_decay).add_(pm.detach(), alpha=1.0 - ema_decay)
+            for be, bm in zip(ema.buffers(), model.buffers()):
+                be.copy_(bm)
+
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     total_steps = max(len(dl) * args.epochs, 1)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
-    # 打点のフレームは少ないので重みを付ける。タムは少ないので重く、シンバルは誤検出が多いので軽く
-    pos_weight = torch.tensor([6.0, 6.0, 6.0, 8.0, 4.0][: len(classes)], device=device)
+    # 打点のフレームは少ないので重みを付ける。ハイハットとスネアは小さい打の取りこぼしが多いので重く、シンバルは誤検出が多いので軽く
+    pos_weight = torch.tensor([6.0, 8.0, 8.0, 8.0, 4.0][: len(classes)], device=device)
 
-    def predict(feat: np.ndarray) -> np.ndarray:
-        model.eval()
-        with torch.no_grad():
-            p = model(torch.from_numpy(feat[None]).to(device))[0].cpu().numpy()
-        model.train()
-        return p
+    def make_predict(net):
+        def predict(feat: np.ndarray) -> np.ndarray:
+            net.eval()
+            with torch.no_grad():
+                p = net(torch.from_numpy(feat[None]).to(device))[0].cpu().numpy()
+            return p
+        return predict
+
+    predict_raw = make_predict(model)
+    predict_ema = make_predict(ema)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     log_path = out.with_suffix(".log.txt")
     log_path.write_text(f"E-GMD: 学習 {len(train)} 本（キット {len(kits)} 種）、検証 {len(val)} 本、にじみ用の音声 {len(bleed)} 本、"
-                        f"合成の混ぜ込み {args.synthetic_ratio:g}、hidden {args.hidden}、n_mels {args.n_mels}、pools {args.pools}、delta {not args.no_delta}、"
-                        f"batch {args.batch}、epochs {args.epochs}、lr {args.lr}\n", encoding="utf-8")
+                        f"合成の混ぜ込み {args.synthetic_ratio:g}、hidden {args.hidden}、layers {args.layers}、n_mels {args.n_mels}、pools {args.pools}、"
+                        f"delta {not args.no_delta}、EMA {args.ema}、batch {args.batch}、epochs {args.epochs}、lr {args.lr}\n", encoding="utf-8")
 
     def log(msg: str) -> None:
         print(msg, flush=True)
@@ -289,25 +308,35 @@ def train_egmd(args) -> int:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             opt.step()
             sched.step()
+            update_ema()
             losses.append(loss.item())
             step += 1
             if step % 50 == 0:
                 print(f"  epoch {epoch} step {step}/{total_steps}  loss {np.mean(losses[-50:]):.4f}  ({time.time() - t_start:.0f}s)", flush=True)
-        scores = score_examples(predict, val_examples, cfg, classes)
-        thr_by_class = best_thresholds(scores, classes)
-        f_best = score_with_thresholds(predict, val_examples, cfg, classes, thr_by_class)
+        # 生の重みと EMA の重みの両方を検証し、良い方を残す
+        cands = {}
+        for name, pred in (("raw", predict_raw), ("ema", predict_ema)):
+            scores = score_examples(pred, val_examples, cfg, classes)
+            thr_by_class = best_thresholds(scores, classes)
+            f_best = score_with_thresholds(pred, val_examples, cfg, classes, thr_by_class)
+            cands[name] = (scores, thr_by_class, f_best)
+        model.train()
+        best_name = max(cands, key=lambda k: cands[k][2]["m0_1"])
+        scores, thr_by_class, f_best = cands[best_name]
         log(f"epoch {epoch}  loss {np.mean(losses):.4f}  検証（{len(val_examples)} 本 × {args.val_seconds:.0f} 秒）  ({time.time() - t_start:.0f}s):\n{format_scores(scores, classes)}\n"
-            f"  種類別のしきい値 {thr_by_class}: " + " ".join(f"{c} {f_best[c]:.3f}" for c in classes) + f"  M0-1 {f_best['m0_1']:.3f}")
-        torch.save({"state_dict": model.state_dict(), "hidden": args.hidden, "pools": args.pools, "delta": not args.no_delta, "classes": classes,
-                    "features": cfg.__dict__, "epoch": epoch}, out.with_suffix(".pt"))
+            f"  種類別のしきい値 {thr_by_class}: " + " ".join(f"{c} {f_best[c]:.3f}" for c in classes) + f"  M0-1 {f_best['m0_1']:.3f}"
+            f"（raw {cands['raw'][2]['m0_1']:.3f} / ema {cands['ema'][2]['m0_1']:.3f} → {best_name}）")
+        torch.save({"state_dict": model.state_dict(), "ema_state_dict": ema.state_dict(), "hidden": args.hidden, "layers": args.layers, "pools": args.pools,
+                    "delta": not args.no_delta, "classes": classes, "features": cfg.__dict__, "epoch": epoch}, out.with_suffix(".pt"))
         if f_best["m0_1"] > best_m0:
             best_m0, best_thr = f_best["m0_1"], thr_by_class
-            export_onnx(model, cfg, classes, out, best_thr,
+            chosen = ema if best_name == "ema" else model
+            export_onnx(chosen, cfg, classes, out, best_thr,
                         {"trained_on": "E-GMD (CC BY 4.0)" + (f" + synthetic {args.synthetic_ratio:g}" if args.synthetic_ratio else ""),
-                         "epochs": epoch, "train_tracks": len(train), "kits": len(kits), "hidden": args.hidden, "pools": args.pools, "delta": not args.no_delta,
+                         "epochs": epoch, "train_tracks": len(train), "kits": len(kits), "hidden": args.hidden, "layers": args.layers, "pools": args.pools,
+                         "delta": not args.no_delta, "weights": best_name, "ema": args.ema,
                          "bleed_files": len(bleed), "val_m0_1": best_m0, "val_scores": {str(k): v for k, v in scores.items()}, "seed": args.seed})
             model.to(device)
-            log(f"  → 検証の M0-1 が最良（{best_m0:.3f}、しきい値 {best_thr}）なので ONNX を更新")
     log(f"終了。最良の検証 M0-1 {best_m0:.3f}（しきい値 {best_thr}）。モデル: {out}。ログ: {log_path}")
     return 0
 
@@ -317,7 +346,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=str(Path(__file__).resolve().parent / "models" / "crnn_synth.onnx"))
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="auto", help="auto / cuda / cpu")
-    ap.add_argument("--hidden", type=int, default=48, help="GRU の隠れ層の大きさ（E-GMD では既定 128）")
+    ap.add_argument("--hidden", type=int, default=48, help="GRU の隠れ層の大きさ（E-GMD では既定 160）")
+    ap.add_argument("--layers", type=int, default=1, help="GRU の層数（E-GMD では既定 2）")
+    ap.add_argument("--ema", type=float, default=0.999, help="重みの移動平均の減衰（E-GMD）。0 で使わない")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--seconds", type=float, default=6.0, help="1 区間の長さ（秒）")
     # 合成
@@ -331,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-tracks", type=int, default=8000, help="学習に使うトラック数の上限（0 で全部。v4 から既定 8000）")
     ap.add_argument("--chunks-per-track", type=int, default=2)
     ap.add_argument("--workers", type=int, default=4, help="DataLoader のワーカー数（Windows で問題があれば 0）")
-    ap.add_argument("--val-tracks", type=int, default=80)
+    ap.add_argument("--val-tracks", type=int, default=160)
     ap.add_argument("--n-mels", type=int, default=64, help="メル帯域の数（既定 64。v3 で 96 を試したが効かなかった）")
     ap.add_argument("--pools", type=int, default=2, choices=(1, 2), help="周波数方向に半分にする回数（既定 2）")
     ap.add_argument("--no-delta", action="store_true", help="対数メルの時間差分のチャンネルを使わない（v4 から既定で使う）")
@@ -341,7 +372,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.egmd:
         if args.hidden == 48:
-            args.hidden = 128
+            args.hidden = 160
+        if args.layers == 1:
+            args.layers = 2
         if args.seconds == 6.0:
             args.seconds = 8.0
         return train_egmd(args)
