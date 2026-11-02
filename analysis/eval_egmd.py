@@ -23,6 +23,18 @@ from drumeval.infer import load_meta  # noqa: E402
 from drumeval.labels import M0_CLASSES, load_hits_midi  # noqa: E402
 
 
+def _drop_quiet(ref, est, min_velocity: int, tol: float = 0.05):
+    """velocity が min_velocity 未満の正解の打と、それに対応する（同じ種類で ±tol 秒の）推定の打を外す。"""
+    if min_velocity <= 0:
+        return ref, est
+    from drumeval.labels import to_coarse
+
+    quiet = [h for h in ref if (h.velocity or 127) < min_velocity]
+    keep_ref = [h for h in ref if (h.velocity or 127) >= min_velocity]
+    keep_est = [g for g in est if not any(to_coarse(q.cls) == to_coarse(g.cls) and abs(q.time - g.time) <= tol for q in quiet)]
+    return keep_ref, keep_est
+
+
 def _diagnose(ref, est, diag: dict, tol: float = 0.05) -> None:
     from drumeval.labels import to_coarse
 
@@ -84,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--by-kit", action="store_true", help="キットごとの M0-1 も出す（電子系のキットが弱いかを見る）")
     ap.add_argument("--diagnose", action="store_true", help="ハイハットとシンバルの取りこぼし・誤検出の内訳（小さい打か、同時の打か、混同か）を出す")
     ap.add_argument("--sweep", action="store_true", help="しきい値 0.3〜0.8 で種類ごとの F を出す")
+    ap.add_argument("--min-velocity", type=int, default=0, help="この velocity 未満の正解の打を評価から外す（例: 40。ゴーストノートを除いた F 値）。"
+                    "外した打に対応する推定（±50 ms）も数えない")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
@@ -107,9 +121,10 @@ def main(argv: list[str] | None = None) -> int:
     diag = {c: {"fn_quiet": 0, "fn_loud": 0, "fn_masked": 0, "fn_free": 0, "fp_other": {}, "fp_none": 0, "n_ref": 0, "n_est": 0} for c in ("hihat", "cymbal", "snare")}
     for tr in tracks:
         x = load_audio(tr.audio, cfg.sr, 0.0, args.seconds)
-        hits = [h for h in load_hits_midi(tr.midi) if h.time < x.size / cfg.sr]
+        hits_all = [h for h in load_hits_midi(tr.midi) if h.time < x.size / cfg.sr]
         prob = sess.run(None, {sess.get_inputs()[0].name: log_mel(x, cfg)[None]})[0][0]
-        est = pick_hits(prob, cfg, classes, thr)
+        est_all = pick_hits(prob, cfg, classes, thr)
+        hits, est = _drop_quiet(hits_all, est_all, args.min_velocity)
         if args.sweep:
             for t in sweep:
                 s_t = transcription_scores(hits, pick_hits(prob, cfg, classes, t), classes)
@@ -126,7 +141,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.check_offset:
             offsets.append(estimate_offset(x, cfg.sr, hits, cfg))
 
-    print(f"E-GMD {args.split} 分割 {len(tracks)} 本 × {args.seconds:.0f} 秒、しきい値 {thr}（特徴量: {cfg.n_mels} メル）")
+    print(f"E-GMD {args.split} 分割 {len(tracks)} 本 × {args.seconds:.0f} 秒、しきい値 {thr}（特徴量: {cfg.n_mels} メル）"
+          + (f"、velocity {args.min_velocity} 未満の打を除く" if args.min_velocity > 0 else ""))
     print(f"{'種類':8s} {'P':>6s} {'R':>6s} {'F':>6s}")
     for c in classes:
         print(f"{c:8s} {np.mean(per_class[c]['p']):6.3f} {np.mean(per_class[c]['r']):6.3f} {np.mean(per_class[c]['f']):6.3f}")
