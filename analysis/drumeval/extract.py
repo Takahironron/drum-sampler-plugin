@@ -209,6 +209,26 @@ def segment_features(a: np.ndarray, sr: int) -> np.ndarray:
     return np.array([20.0 * np.log10(peak), np.log10(decay + 1e-3), np.log(centroid), *bands])
 
 
+def head_embedding(a: np.ndarray, sr: int, head_sec: float = 0.25, n_mels: int = 40, n_fft: int = 1024, hop: int = 512) -> np.ndarray:
+    """一打の先頭 `head_sec` 秒の対数メルスペクトログラムを 1 本のベクトルにした埋め込み。
+
+    6 個の特徴（`segment_features`）より細かく音色を表す。計画書 3.4 の候補 (b)「埋め込みで近い音を探す」の最小版。
+    長さは固定（短い音は無音で埋める）。音量の影響を減らすため、全体の最大値を 0 dB に合わせる。
+    """
+    from .features import FeatureConfig, mel_filterbank
+
+    n = int(head_sec * sr)
+    x = np.asarray(a, dtype=np.float64)[:n]
+    x = np.pad(x, (0, max(n - x.size, 0)))
+    x = x / (np.max(np.abs(x)) + 1e-9)
+    cfg = FeatureConfig(sr=sr, n_fft=n_fft, hop=hop, n_mels=n_mels, f_min=30.0, f_max=min(16000.0, sr / 2 * 0.95))
+    from scipy.signal import stft
+
+    _, _, z = stft(x, nperseg=n_fft, noverlap=n_fft - hop, window="hann", padded=True, boundary="zeros")
+    mel = mel_filterbank(cfg) @ (np.abs(z) ** 2)
+    return np.log1p(1000.0 * mel).ravel()
+
+
 def _kmeans(x: np.ndarray, k: int, rng: np.random.Generator, iters: int = 30) -> np.ndarray:
     """小さな k-means（k-means++ の初期化）。返り値は各中心に最も近い点の添字（代表）。"""
     n = x.shape[0]
@@ -230,12 +250,14 @@ def _kmeans(x: np.ndarray, k: int, rng: np.random.Generator, iters: int = 30) ->
 
 
 def build_kit_by_features(segments: list[Segment], sr: int, n_per_class: int | dict[str, int] = 12, seed: int = 0,
-                          classes: tuple[str, ...] = COARSE_CLASSES) -> Kit:
-    """種類ごとに、特徴空間（音量・減衰・明るさ）の k-means の代表 `n_per_class` 音でキットを作る。
+                          classes: tuple[str, ...] = COARSE_CLASSES, feature_fn=None) -> Kit:
+    """種類ごとに、特徴空間の k-means の代表 `n_per_class` 音でキットを作る。
 
-    3 層 × 3 音のように音量だけで選ぶのではなく、奏法の違い（開いた／閉じたハイハット、リムなど）も代表に残る。
-    再生時は各打の特徴に最も近い音を選び、音量を合わせる（`render_kit(..., hit_features=...)`）。
+    `feature_fn(audio, sr)` は既定で `segment_features`（音量・減衰・明るさ・帯域の 6 個）。`head_embedding` を渡すと
+    先頭 0.25 秒の対数メルで選ぶ。3 層 × 3 音のように音量だけで選ぶのではなく、奏法の違いも代表に残る。
+    再生時は各打の特徴に最も近い音を選び、音量を合わせる（`render_kit(..., hit_features=...)`。同じ feature_fn を使うこと）。
     """
+    feature_fn = feature_fn or segment_features
     rng = np.random.default_rng(seed)
     parts: dict[str, list[Layer]] = {}
     feat_norm: dict[str, tuple[list[float], list[float]]] = {}
@@ -243,9 +265,9 @@ def build_kit_by_features(segments: list[Segment], sr: int, n_per_class: int | d
         segs = [s for s in segments if s.cls == cls]
         if not segs:
             continue
-        feats = np.array([segment_features(s.audio, sr) for s in segs])
+        feats = np.array([feature_fn(s.audio, sr) for s in segs])
         mean = feats.mean(axis=0)
-        std = feats.std(axis=0) + 1e-6
+        std = feats.std(axis=0) + 1e-3
         z = (feats - mean) / std
         n_cls = n_per_class.get(cls, 12) if isinstance(n_per_class, dict) else n_per_class
         reps = _kmeans(z, n_cls, rng) if 0 < n_cls < len(segs) else np.arange(len(segs))  # n_cls <= 0 なら全部を代表にする

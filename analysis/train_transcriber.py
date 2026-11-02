@@ -15,7 +15,7 @@ E-GMD（実データ。CC BY 4.0。GPU があれば自動で使う）::
   CD 曲のステムを混ぜたモデルは評価用に限る（製品のモデルには権利の明確な音だけを使う。R3）。
 - 出力: `<out>.onnx` と、特徴量の設定・種類・しきい値を書いた `<out>.json`。チェックポイント `<out>.pt` も毎エポック書く。
   エポックごとの検証の結果は `<out>.log.txt` に残る。
-- 検証: E-GMD の validation 分割から `--val-tracks` 本（先頭 `--val-seconds` 秒）で種類ごとの F 値を出し、しきい値 0.3／0.4／0.5 のうち
+- 検証: E-GMD の validation 分割から `--val-tracks` 本（先頭 `--val-seconds` 秒）で種類ごとの F 値を出し、しきい値 0.3〜0.7 のうち
   種類ごとに F が最も高いものを選んで ONNX の設定（`thresholds`）に書く。M0-1（kick/snare/hihat の F の平均）が最良のエポックを残す。
 - 特徴量と形: E-GMD では 96 メル帯域、周波数方向の縮小 1 回（ハイハットとシンバルの帯域を潰さない）。
 """
@@ -37,7 +37,7 @@ from drumeval.features import FeatureConfig, frame_targets, log_mel, pick_hits  
 from drumeval.labels import M0_CLASSES  # noqa: E402
 from drumeval.synth import render  # noqa: E402
 
-THRESHOLDS = (0.3, 0.4, 0.5)
+THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7)
 
 
 # ---------------------------------------------------------------------------

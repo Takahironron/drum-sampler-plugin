@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from drumeval import Hit, load_hits, multi_resolution_stft_distance, transcription_scores  # noqa: E402
 from drumeval.baseline import onsets_from_part, transcribe  # noqa: E402
 from drumeval.extract import (  # noqa: E402
-    build_kit, build_kit_by_features, cut_segments, cut_segments_from_parts, estimate_velocities, hit_segments_from_parts,
+    build_kit, build_kit_by_features, cut_segments, cut_segments_from_parts, estimate_velocities, head_embedding, hit_segments_from_parts,
     render_kit, segment_features, self_render_from_parts,
 )
 from drumeval.labels import M0_CLASSES, to_coarse  # noqa: E402
@@ -312,6 +312,20 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             y_all = _match_rms(render_kit(ref_v, kit_all, duration=x.size / sr, hit_levels_db=levels, hit_features=feats, gain_match=True,
                                           choke=CHOKE_POLICIES[choke], hit_audio=own, align=True, leave_one_out=True), x)
             row["stft_parts_ceiling"] = multi_resolution_stft_distance(x, y_all)["total"]
+            # D: 埋め込み（先頭 0.25 秒の対数メル）で代表を選び、各打に最も近い音を選ぶ ＋ 音量合わせ ＋ 位置合わせ ＋ チョーク
+            embs = [head_embedding(a, sr) if a is not None else None for a in own]
+            kit_e = build_kit_by_features(segs_p, sr, n_per_class=parse_kit_size(kit_size), feature_fn=head_embedding)
+            yd = _match_rms(render_kit(ref_v, kit_e, duration=x.size / sr, hit_levels_db=levels, hit_features=embs, gain_match=True,
+                                       choke=CHOKE_POLICIES[choke], hit_audio=own, align=True), x)
+            row["stft_parts_embed"] = multi_resolution_stft_distance(x, yd)["total"]
+            kit_e_all = build_kit_by_features(segs_p, sr, n_per_class=0, feature_fn=head_embedding)
+            yd_all = _match_rms(render_kit(ref_v, kit_e_all, duration=x.size / sr, hit_levels_db=levels, hit_features=embs, gain_match=True,
+                                           choke=CHOKE_POLICIES[choke], hit_audio=own, align=True, leave_one_out=True), x)
+            row["stft_parts_embed_ceiling"] = multi_resolution_stft_distance(x, yd_all)["total"]
+            if render:
+                import soundfile as sf
+
+                sf.write(song_dir / "rerender_parts_embed.wav", (yd / (np.max(np.abs(yd)) + 1e-9) * 0.9).astype(np.float32), sr)
             # 時間軸の診断: どの区間で C が悪いか、そこで自己再現も悪いか（打点側の問題か、代表音の不足か）
             tl = timeline(x, {"self": ys, "C": yc}, ref_v, sr)
             worst = sorted(tl, key=lambda r: -r["C"])[:5]
@@ -353,11 +367,12 @@ def to_markdown(rows: list[dict], title: str) -> str:
     cols = ("id", "seconds", "est_source", "truth", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
             "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_gain_choke",
             "kit_features", "stft_parts_features_all", "stft_parts_features_hihat", "stft_parts_features_none", "stft_parts_ceiling",
-            "loss_shares", "stft_self", "stft_parts_sum")
+            "stft_parts_embed", "stft_parts_embed_ceiling", "loss_shares", "stft_self", "stft_parts_sum")
     heads = ("曲ID", "秒", "推定", "正解の種類", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
              "重ならない打（混合）", "層/音（混合）", "STFT（混合）", "重ならない打（パート別）", "層/音（パート別 3層×3音）", "STFT（A: 3層×3音）",
              "STFT（B: A＋音量合わせ＋チョーク）", "音の数（C: 特徴で選ぶ）", "STFT（C: チョーク全部）", "STFT（C: ハイハットだけ）", "STFT（C: チョーク無し）",
-             "STFT（上限: 全部を代表・自分以外）", "C の損失の内訳（種類を自己再現に置き換えたときの下がり幅）", "STFT（自己再現）", "パートの和 vs 元")
+             "STFT（上限: 全部を代表・自分以外）", "STFT（D: 埋め込みで選ぶ）", "STFT（D の上限）",
+             "C の損失の内訳（種類を自己再現に置き換えたときの下がり幅）", "STFT（自己再現）", "パートの和 vs 元")
     lines = [f"# {title}", "", "| " + " | ".join(heads) + " |", "|" + "---|" * len(heads)]
     def f(v):
         return "" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
@@ -380,8 +395,11 @@ def to_markdown(rows: list[dict], title: str) -> str:
                      f"C（特徴で選ぶ代表音＋音量合わせ＋チョーク）{np.mean([r['stft_parts_features_all'] for r in rows if 'stft_parts_features_all' in r]):.3f}、"
                      f"C でチョークをハイハットだけ {np.mean([r['stft_parts_features_hihat'] for r in rows if 'stft_parts_features_hihat' in r]):.3f}、"
                      f"C でチョーク無し {np.mean([r['stft_parts_features_none'] for r in rows if 'stft_parts_features_none' in r]):.3f}、"
-                     f"上限（全部を代表にして自分以外から選ぶ）{np.mean([r['stft_parts_ceiling'] for r in rows if 'stft_parts_ceiling' in r]):.3f}")
-        lines.append("- 方式 C は v3 から、特徴に帯域のエネルギー（低・中・高）を足し、選んだ音の立ち上がりを元に相互相関で合わせて置く。")
+                     f"上限（全部を代表にして自分以外から選ぶ）{np.mean([r['stft_parts_ceiling'] for r in rows if 'stft_parts_ceiling' in r]):.3f}、"
+                     f"D（埋め込みで選ぶ）{np.mean([r['stft_parts_embed'] for r in rows if 'stft_parts_embed' in r]):.3f}、"
+                     f"D の上限 {np.mean([r['stft_parts_embed_ceiling'] for r in rows if 'stft_parts_embed_ceiling' in r]):.3f}")
+        lines.append("- 方式 C は、特徴（音量・減衰・明るさ・帯域のエネルギー）で代表を選び、選んだ音の立ち上がりを元に相互相関で合わせて置く。"
+                     "方式 D は、先頭 0.25 秒の対数メル（埋め込み）で代表を選ぶ。WAV は rerender_parts.wav（C）と rerender_parts_embed.wav（D）。")
     lines.append("- 「種類別」の打数は ki=kick、sn=snare、hi=hihat、to=tom、cy=cymbal。")
     worst = [(r["id"], r["worst_windows"]) for r in rows if r.get("worst_windows")]
     if worst:
