@@ -239,7 +239,7 @@ def read_start_override(song_dir: Path) -> float | None:
 def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song_id: str | None = None, wav: Path | None = None,
                   model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: str = "24",
                   choke: str = "all", start_sec: float | None = None, fit_fx: bool = False, fit_seconds: float = 20.0,
-                  parts_mode: str = "sl") -> dict:
+                  parts_mode: str = "sl", save_kit_dir: str | None = None) -> dict:
     wav = wav or find_stem(song_dir)
     x_full, sr = load_mono(str(wav), None)
     # 評価の開始位置: start.txt → --start → ドラムが鳴り始める位置の自動検出（キックとスネアのパート別ステムがあればその合計で）
@@ -448,6 +448,11 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
                 sf.write(song_dir / "rerender_parts.wav", (yc / (np.max(np.abs(yc)) + 1e-9) * 0.9).astype(np.float32), sr)
                 sf.write(song_dir / "rerender_self.wav", (ys / (np.max(np.abs(ys)) + 1e-9) * 0.9).astype(np.float32), sr)
                 write_audition(kit_f, song_dir / "kit_parts_audition.wav")
+            if save_kit_dir:
+                from drumeval.extract import save_kit
+
+                save_kit(kit_f, song_dir / save_kit_dir)
+                row["kit_saved"] = str(song_dir / save_kit_dir / "kit.json")
     if render:
         import soundfile as sf
 
@@ -497,6 +502,9 @@ def to_markdown(rows: list[dict], title: str) -> str:
     if fx:
         lines.append(f"- M0-3（実ステム）: 合成の汎用キットで鳴らした乾いた音に、固定チェーン（ゲイン・3 バンド EQ・リバーブ）を元のステムへ当てはめた距離の平均 "
                      f"{np.mean([b for b, _ in fx]):.3f} → {np.mean([a for _, a in fx]):.3f}（{len(fx)} 曲）。WAV は synthkit_dry.wav と synthkit_fx.wav。")
+    saved = [r["kit_saved"] for r in rows if r.get("kit_saved")]
+    if saved:
+        lines.append("- 方式 C のキットを保存した（プラグインの「kit.json を読む」で開ける）: " + "、".join(saved))
     nm = [r["nmfd_snr"] for r in rows if r.get("nmfd_snr")]
     if nm:
         lines.append("- パート別の切り出しは NMFD（推定の打点を初期値にした自前のパート分け）で行った（--parts nmfd）。「NMFD の SNR」は SpectraLayers のパート別ステムを正解の代わりにした SNR（dB）。WAV は nmfd_<種類>.wav。")
@@ -534,6 +542,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--only", default=None, help="曲 ID をコンマ区切りで指定すると、その曲だけ評価する（例: a01,a07）")
     ap.add_argument("--parts", choices=("sl", "nmfd"), default="sl",
                     help="パート別の切り出しに使うパート: sl = 分離ツールのパート別ステムと疑似正解、nmfd = 推定の打点を初期値にした NMFD（製品の経路）")
+    ap.add_argument("--save-kit", default=None, metavar="DIR",
+                    help="方式 C のキット（代表音の WAV と kit.json）を各曲のフォルダの DIR に保存する（プラグインで読める。例: kit）")
     ap.add_argument("--fit-fx", action="store_true", help="M0-3 を実ステムで測る: 合成キットの乾いた音に固定チェーンを当てはめ、前後の距離を出す（1 曲 2〜3 分）")
     ap.add_argument("--fit-seconds", type=float, default=20.0, help="当てはめに使う長さ（秒）")
     args = ap.parse_args(argv)
@@ -557,7 +567,8 @@ def main(argv: list[str] | None = None) -> int:
         est = Path(args.est_dir) / f"{song_id}.csv" if args.est_dir else None
         print(f"{song_id} ({f.name}) ...", file=sys.stderr)
         rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke, start_sec=args.start,
-                                  fit_fx=args.fit_fx, fit_seconds=args.fit_seconds, parts_mode=args.parts))
+                                  fit_fx=args.fit_fx, fit_seconds=args.fit_seconds, parts_mode=args.parts,
+                                  save_kit_dir=args.save_kit))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)

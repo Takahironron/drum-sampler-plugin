@@ -49,6 +49,6 @@
 | 区分 B の評価用ステム | 未 | Takahiro の DAW で |
 | NMFD の試作 | 済（合成音で確認。実ステムは未） | `analysis/drumeval/nmfd.py`、`separate_parts.py`、`run_eval.py --parts nmfd`。合成音: スネア 19 dB、ハイハット 50 dB、キック 9 dB、シンバル 0 dB 前後 |
 | 採譜 v6（E-GMD 全データ） | 未 | |
-| JUCE の KitModel と SampleVoice | 未 | |
+| JUCE の KitModel と SampleVoice | 済 | `plugin/Source/KitModel.*`、`SampleEngine.*`。Python の `kit.json` を読み、層・ラウンドロビン・音量合わせ・チョークで鳴らす。`KitRenderTest` で DAW 無しの通し、Linux の pluginval（画面のテスト除く）SUCCESS。CI で Python → C++ の受け渡しを毎回通す |
 | ONNX Runtime の試作 | 未 | |
 | M1 の受け入れ試験と回帰テスト | 未 | |

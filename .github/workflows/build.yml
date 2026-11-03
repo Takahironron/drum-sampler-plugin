@@ -56,6 +56,12 @@ jobs:
           name: DrumSamplerPlugin-windows-vst3
           path: build/DrumSamplerPlugin_artefacts/${{ env.BUILD_TYPE }}/VST3/
 
+      - name: Upload Standalone
+        uses: actions/upload-artifact@v4
+        with:
+          name: DrumSamplerPlugin-windows-standalone
+          path: build/DrumSamplerPlugin_artefacts/${{ env.BUILD_TYPE }}/Standalone/
+
       - name: Upload pluginval logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -86,7 +92,18 @@ jobs:
         run: cmake -S plugin -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
 
       - name: Build
-        run: cmake --build build --target DrumSamplerPlugin_VST3 DrumSamplerPlugin_Standalone
+        run: cmake --build build --target DrumSamplerPlugin_VST3 DrumSamplerPlugin_Standalone KitRenderTest
+
+      # Python が作った kit.json を C++ のエンジンが読んで鳴らせるか（解析 → 音源 の受け渡しの回帰テスト）
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Make a demo kit with the analysis code
+        run: |
+          pip install -r analysis/requirements.txt
+          python analysis/make_demo_kit.py build/demo_kit
+      - name: Render the demo kit with the C++ engine
+        run: ./build/KitRenderTest_artefacts/${{ env.BUILD_TYPE }}/KitRenderTest build/demo_kit/kit.json build/demo_render.wav 6
 
   macos:
     name: macOS (compile check)

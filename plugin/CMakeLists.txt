@@ -1,4 +1,4 @@
-# Phase 0 の空のプラグイン: MIDI でサンプルを鳴らすだけ（VST3 と Standalone）。
+# Phase 1 の最小版: Python が作った kit.json を読んで MIDI で鳴らす（VST3 と Standalone）。Phase 0 では空のプラグインだった。
 #
 # 使い方（Windows、Visual Studio 2022）:
 #   cmake -S plugin -B build -G "Visual Studio 17 2022" -A x64
@@ -56,6 +56,10 @@ target_sources(DrumSamplerPlugin PRIVATE
     Source/PluginEditor.h
     Source/BuiltInSounds.cpp
     Source/BuiltInSounds.h
+    Source/KitModel.cpp
+    Source/KitModel.h
+    Source/SampleEngine.cpp
+    Source/SampleEngine.h
 )
 
 target_compile_definitions(DrumSamplerPlugin PUBLIC
@@ -71,3 +75,14 @@ target_link_libraries(DrumSamplerPlugin PRIVATE
     juce::juce_recommended_lto_flags
     juce::juce_recommended_warning_flags
 )
+
+# DAW 無しでエンジンを通す確認用のコンソールプログラム（kit.json → WAV）
+juce_add_console_app(KitRenderTest PRODUCT_NAME "KitRenderTest")
+target_sources(KitRenderTest PRIVATE
+    Tools/KitRenderTest.cpp
+    Source/KitModel.cpp
+    Source/SampleEngine.cpp
+    Source/BuiltInSounds.cpp
+)
+target_compile_definitions(KitRenderTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=0)
+target_link_libraries(KitRenderTest PRIVATE juce::juce_audio_utils PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)

@@ -13,7 +13,48 @@ DrumSamplerAudioProcessorEditor::DrumSamplerAudioProcessorEditor (DrumSamplerAud
     gainLabel.setJustificationType (juce::Justification::centred);
     addAndMakeVisible (gainLabel);
 
-    setSize (360, 200);
+    loadButton.onClick = [this] { chooseKit(); };
+    addAndMakeVisible (loadButton);
+    builtInButton.onClick = [this] { processor.useBuiltInKit(); refreshKitInfo(); };
+    addAndMakeVisible (builtInButton);
+
+    kitInfo.setJustificationType (juce::Justification::topLeft);
+    kitInfo.setFont (juce::FontOptions (13.0f));
+    addAndMakeVisible (kitInfo);
+    refreshKitInfo();
+
+    setSize (460, 260);
+}
+
+void DrumSamplerAudioProcessorEditor::chooseKit()
+{
+    chooser = std::make_unique<juce::FileChooser> ("kit.json を選ぶ", processor.currentKitFile().getParentDirectory(), "*.json");
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                          [this] (const juce::FileChooser& fc)
+                          {
+                              const auto file = fc.getResult();
+                              if (file == juce::File())
+                                  return;
+                              juce::String error;
+                              if (! processor.loadKit (file, error))
+                                  kitInfo.setText ("読み込み失敗: " + error, juce::dontSendNotification);
+                              else
+                                  refreshKitInfo();
+                          });
+}
+
+void DrumSamplerAudioProcessorEditor::refreshKitInfo()
+{
+    juce::String text;
+    if (auto kit = processor.currentKit())
+    {
+        text << "キット: " << kit->name() << "\n";
+        for (const auto& part : kit->parts())
+            text << "  MIDI " << part.midiNote << "  " << part.cls << "  " << (int) part.samples.size() << " 音 ("
+                 << juce::String (part.minPeakDb, 1) << " ～ " << juce::String (part.maxPeakDb, 1) << " dB)"
+                 << (part.choke ? "  チョーク" : "") << "\n";
+    }
+    kitInfo.setText (text, juce::dontSendNotification);
 }
 
 void DrumSamplerAudioProcessorEditor::paint (juce::Graphics& g)
@@ -21,20 +62,20 @@ void DrumSamplerAudioProcessorEditor::paint (juce::Graphics& g)
     g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
     g.setColour (juce::Colours::white);
     g.setFont (juce::FontOptions (16.0f));
-    g.drawText ("DrumSamplerPlugin (Phase 0)", getLocalBounds().removeFromTop (30), juce::Justification::centred);
-
-    g.setFont (juce::FontOptions (13.0f));
-    juce::String lines;
-    for (const auto& s : processor.getSounds())
-        lines << "MIDI " << s.midiNote << " : " << s.name << "\n";
-    g.drawMultiLineText (lines, 20, 60, 160);
+    g.drawText ("DrumSamplerPlugin (Phase 1)", getLocalBounds().removeFromTop (30), juce::Justification::centred);
 }
 
 void DrumSamplerAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced (20);
-    area.removeFromTop (20);
+    auto area = getLocalBounds().reduced (16);
+    area.removeFromTop (24);
     auto right = area.removeFromRight (140);
     gainLabel.setBounds (right.removeFromTop (20));
     gainSlider.setBounds (right.removeFromTop (110));
+    auto buttons = area.removeFromTop (28);
+    loadButton.setBounds (buttons.removeFromLeft (150));
+    buttons.removeFromLeft (8);
+    builtInButton.setBounds (buttons.removeFromLeft (120));
+    area.removeFromTop (8);
+    kitInfo.setBounds (area);
 }

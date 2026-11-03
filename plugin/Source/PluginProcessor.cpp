@@ -1,23 +1,12 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
-namespace
-{
-    constexpr int kNumVoices = 16;
-    constexpr double kDefaultSampleRate = 44100.0;
-}
-
 DrumSamplerAudioProcessor::DrumSamplerAudioProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       state (*this, nullptr, "STATE", createLayout())
 {
     gainParam = state.getRawParameterValue ("gain");
-
-    for (int i = 0; i < kNumVoices; ++i)
-        synth.addVoice (new juce::SamplerVoice());
-
-    // prepareToPlay の前に鳴らされても落ちないように、既定のサンプリング周波数で一度作っておく
-    rebuildSounds (kDefaultSampleRate);
+    useBuiltInKit();
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout DrumSamplerAudioProcessor::createLayout()
@@ -30,21 +19,35 @@ juce::AudioProcessorValueTreeState::ParameterLayout DrumSamplerAudioProcessor::c
     return layout;
 }
 
-void DrumSamplerAudioProcessor::rebuildSounds (double sampleRate)
+void DrumSamplerAudioProcessor::useBuiltInKit()
 {
-    // 音を鳴らすスレッドでは呼ばない（メモリ確保をする）
-    synth.clearSounds();
-    sounds = builtin::makeDefaultSounds (sampleRate);
-    for (const auto& s : sounds)
-        synth.addSound (builtin::makeSamplerSound (s, sampleRate));
-    soundsSampleRate = sampleRate;
+    auto model = kit::KitModel::makeBuiltIn (currentSampleRate);
+    previousKit = kitForDisplay;
+    kitForDisplay = model;
+    kitFile = juce::File();
+    engine.setKit (model);
+    state.state.setProperty ("kitPath", "", nullptr);
+}
+
+bool DrumSamplerAudioProcessor::loadKit (const juce::File& kitJson, juce::String& error)
+{
+    auto model = std::make_shared<kit::KitModel>();
+    if (! model->loadFromJson (kitJson, error))
+        return false;
+    previousKit = kitForDisplay;
+    kitForDisplay = model;
+    kitFile = kitJson;
+    engine.setKit (model);
+    state.state.setProperty ("kitPath", kitJson.getFullPathName(), nullptr);
+    return true;
 }
 
 void DrumSamplerAudioProcessor::prepareToPlay (double sampleRate, int)
 {
-    if (! juce::approximatelyEqual (sampleRate, soundsSampleRate))
-        rebuildSounds (sampleRate);
-    synth.setCurrentPlaybackSampleRate (sampleRate);
+    currentSampleRate = sampleRate;
+    engine.prepare (sampleRate);
+    if (kitFile == juce::File() && kitForDisplay != nullptr && kitForDisplay->name() == "Built-in")
+        useBuiltInKit(); // 合成の仮の音はサンプリング周波数に合わせて作り直す
 }
 
 bool DrumSamplerAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -57,7 +60,25 @@ void DrumSamplerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
 {
     juce::ScopedNoDenormals noDenormals;
     buffer.clear();
-    synth.renderNextBlock (buffer, midi, 0, buffer.getNumSamples());
+    engine.beginBlock();
+
+    int pos = 0;
+    const int total = buffer.getNumSamples();
+    for (const auto meta : midi)
+    {
+        const auto msg = meta.getMessage();
+        const int at = juce::jlimit (0, total, meta.samplePosition);
+        if (at > pos)
+        {
+            engine.render (buffer, pos, at - pos);
+            pos = at;
+        }
+        if (msg.isNoteOn())
+            engine.noteOn (msg.getNoteNumber(), msg.getFloatVelocity());
+    }
+    if (total > pos)
+        engine.render (buffer, pos, total - pos);
+
     buffer.applyGain (juce::Decibels::decibelsToGain (gainParam->load()));
 }
 
@@ -75,8 +96,20 @@ void DrumSamplerAudioProcessor::getStateInformation (juce::MemoryBlock& destData
 void DrumSamplerAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     if (auto xml = getXmlFromBinary (data, sizeInBytes))
+    {
         if (xml->hasTagName (state.state.getType()))
+        {
             state.replaceState (juce::ValueTree::fromXml (*xml));
+            const auto path = state.state.getProperty ("kitPath").toString();
+            if (path.isNotEmpty())
+            {
+                juce::String error;
+                const juce::File f (path);
+                if (! (f.existsAsFile() && loadKit (f, error)))
+                    useBuiltInKit();
+            }
+        }
+    }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

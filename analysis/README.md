@@ -30,6 +30,7 @@ pip install -r analysis/requirements-ml.txt
 | `make_eval_midi.py` | 区分 B の評価用 MIDI 曲（正解の打点・区間ラベル付き）を生成 | `python analysis/make_eval_midi.py --out analysis/eval_midi` |
 | `remap_midi_notes.py` | ドラムのノート番号をキットのパッド配置に付け替える（GM → Maschine／XO など） | `python analysis/remap_midi_notes.py song.mid out.mid --preset maschine16` |
 | `render_midi_synth.py` | song.mid を合成音で WAV にする（DAW で書き出す前の確認用） | `python analysis/render_midi_synth.py analysis/eval_midi/b01_rock/song.mid data/preview/b01_rock.wav` |
+| `make_demo_kit.py` | 合成音からデモ用のキット（kit.json と WAV）を作る（プラグインの確認用） | `python analysis/make_demo_kit.py data/kits/demo` |
 | `train_transcriber.py` | 小さな CRNN を学習し ONNX に書き出す。合成データ（`--steps`）か E-GMD（`--egmd`） | `python analysis/train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\stems --epochs 8 --out analysis/models/crnn_egmd_v1.onnx` |
 | `eval_egmd.py` | ONNX の採譜モデルを E-GMD の test 分割で測る（正解は MIDI） | `python analysis/eval_egmd.py analysis/models/crnn_egmd_v1.onnx D:\data\e-gmd-v1.0.0` |
 | `transcribe_onnx.py` | ONNX の採譜モデルを ONNX Runtime で動かす | `python analysis/transcribe_onnx.py analysis/models/crnn_synth.onnx ステム.wav 推定.csv` |
