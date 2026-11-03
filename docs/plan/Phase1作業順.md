@@ -47,7 +47,7 @@
 |---|---|---|
 | Phase 1 の作業順（この文書） | 済 | 2026-11-03 |
 | 区分 B の評価用ステム | 未 | Takahiro の DAW で |
-| NMFD の試作 | 未 | |
+| NMFD の試作 | 済（合成音で確認。実ステムは未） | `analysis/drumeval/nmfd.py`、`separate_parts.py`、`run_eval.py --parts nmfd`。合成音: スネア 19 dB、ハイハット 50 dB、キック 9 dB、シンバル 0 dB 前後 |
 | 採譜 v6（E-GMD 全データ） | 未 | |
 | JUCE の KitModel と SampleVoice | 未 | |
 | ONNX Runtime の試作 | 未 | |

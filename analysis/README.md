@@ -24,7 +24,8 @@ pip install -r analysis/requirements-ml.txt
 | `extract_kit.py` | 重ならない打の切り出し → 強さ別の層 → キット（M0-2 の材料） | `python analysis/extract_kit.py ステム.wav 打点.csv 出力先 --render 再現.wav` |
 | `fit_fx.py` | 固定の形のエフェクトチェーンの当てはめ（M0-3） | `python analysis/fit_fx.py 乾いた音.wav 目標.wav --out params.json --render 当てはめ後.wav` |
 | `pack_stems.py` | 分離したステムを受け渡し用に小さくする（モノラル 44.1 kHz FLAC、先頭 90 秒） | `python analysis/pack_stems.py 分離したWAVのフォルダ data/stems --seconds 90` |
-| `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト）。パート別ステム（キック.wav など）があれば疑似正解で F 値の目安を出し、パート別の切り出しも試す。`--model` で ONNX の採譜モデル、`--render` で聞き比べ用 WAV | `python analysis/run_eval.py data/stems --out data/results/2026-11-01.md` |
+| `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト）。パート別ステム（キック.wav など）があれば疑似正解で F 値の目安を出し、パート別の切り出しも試す。`--model` で ONNX の採譜モデル、`--render` で聞き比べ用 WAV、`--parts nmfd` で自前のパート分け（製品の経路） |
+| `separate_parts.py` | NMFD でドラムのステムをキック／スネア／ハイハット／シンバルに分ける（計画書 3.3 の (2)） | `python analysis/separate_parts.py ドラム.wav 打点.csv 出力先 --reference-dir パート別ステムのフォルダ` | `python analysis/run_eval.py data/stems --out data/results/2026-11-01.md` |
 | `list_itunes_library.py` | iTunes の書き出し（XML かテキスト）をジャンル別の一覧にする（区分 A の選曲用） | `python analysis/list_itunes_library.py ライブラリ.xml --out docs/phase0/itunes一覧.md` |
 | `make_eval_midi.py` | 区分 B の評価用 MIDI 曲（正解の打点・区間ラベル付き）を生成 | `python analysis/make_eval_midi.py --out analysis/eval_midi` |
 | `remap_midi_notes.py` | ドラムのノート番号をキットのパッド配置に付け替える（GM → Maschine／XO など） | `python analysis/remap_midi_notes.py song.mid out.mid --preset maschine16` |
@@ -50,6 +51,12 @@ pip install -r analysis/requirements-ml.txt
 - 打点に強さが無ければ、打点直後 20 ms のピークを種類ごとの分布で 1〜127 に割り当てる（計画書 3.2）。
 - `--render` で同じ打点をキットで鳴らし直し、元のステムとの STFT 距離を出す。聞き比べ（M0-2）はこの2つの WAV で行う。
 - 尾の延長（次の打で切れた分）は Phase 2 の課題で、ここではやらない。
+
+## パート分け（`drumeval/nmfd.py`）
+
+- NMFD（非負値行列因子分解の畳み込み版）。採譜の打点を活性の初期値にし、種類ごとに「打点の後に活性を許す長さ」（キック 0.3 秒、シンバル 1.5 秒など）と帯域の重みを与え、KL ダイバージェンスの乗法更新を回して Wiener マスクで分ける。残差の成分（にじみ・残響を吸う）は既定で有効。パートの和は元に等しい（残差込み）。
+- 合成音では、正しい打点でスネア 15〜19 dB、ハイハット 40〜50 dB、キック 9 dB、シンバルは 0 dB 前後（キックと同時のクラッシュをうまく分けられない）。採譜の誤り（20% 欠け、10% 偽）があると各 5〜10 dB 下がる。実ステムでは SpectraLayers のパート別ステムを正解の代わりに SNR で測る（`run_eval.py --parts nmfd`）。
+- 学習モデルを使わないので権利が明確で軽い。質が足りなければ StemGMD で学習するモデル（計画書 3.3 の (1)）へ。
 
 ## エフェクトの当てはめ（`drumeval/fx.py`）
 
