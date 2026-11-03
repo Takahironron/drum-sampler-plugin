@@ -2,7 +2,7 @@
 
 ドラムのステムからキットを自動で組み、エフェクト込みで再現し、基準パターンから曲の展開（Intro／Verse／Chorus など）を生成するドラム音源プラグイン（JUCE / VST3）。
 
-現在は Phase 0（技術検証）です。計画書は [`docs/plan/ドラム音源プラグイン開発計画.md`](docs/plan/ドラム音源プラグイン開発計画.md)、Phase 0 の作業順と進み具合は [`docs/plan/Phase0作業順.md`](docs/plan/Phase0作業順.md)、Claude Code 向けの説明は [`CLAUDE.md`](CLAUDE.md) にあります。
+Phase 0（技術検証）は M0 判定「続ける」で終わり（[`docs/phase0/M0判定.md`](docs/phase0/M0判定.md)）、現在は Phase 1（MVP）です。計画書は [`docs/plan/ドラム音源プラグイン開発計画.md`](docs/plan/ドラム音源プラグイン開発計画.md)、Phase 1 の作業順は [`docs/plan/Phase1作業順.md`](docs/plan/Phase1作業順.md)、Claude Code 向けの説明は [`CLAUDE.md`](CLAUDE.md) にあります。
 
 ## 構成
 

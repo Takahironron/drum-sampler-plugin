@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-このリポジトリは、Takahiro が個人で開発するドラム音源プラグインのものです。現在は Phase 0（技術検証）で、作業順と進み具合は `docs/plan/Phase0作業順.md` にあります。作業を終えたらその「進み具合」の表を更新する。
+このリポジトリは、Takahiro が個人で開発するドラム音源プラグインのものです。Phase 0（技術検証）は M0 判定「続ける」で終わり（`docs/phase0/M0判定.md`、2026-11-03 確定）、現在は Phase 1（MVP）です。作業順と進み具合は `docs/plan/Phase1作業順.md` にあります（Phase 0 の記録は `docs/plan/Phase0作業順.md`）。作業を終えたらその「進み具合」の表を更新する。
 
 ## やり取りのルール
 
@@ -103,7 +103,9 @@
 | 資料 | 場所 |
 |---|---|
 | 開発計画（初版、2026-10-22） | `docs/plan/ドラム音源プラグイン開発計画.md` |
-| Phase 0 の作業順と進み具合 | `docs/plan/Phase0作業順.md` |
+| Phase 1 の作業順と進み具合 | `docs/plan/Phase1作業順.md` |
+| Phase 0 の作業順と進み具合（終了） | `docs/plan/Phase0作業順.md` |
+| M0 判定（Phase 0 の結論） | `docs/phase0/M0判定.md` |
 | ライセンス一覧（Phase 0） | `docs/phase0/ライセンス一覧.md` |
 | 評価用ステム一覧（Phase 0） | `docs/phase0/評価用ステム一覧.md` |
 | 手元（Windows）で評価を走らせる手順 | `docs/phase0/手元での評価の手順.md` |
