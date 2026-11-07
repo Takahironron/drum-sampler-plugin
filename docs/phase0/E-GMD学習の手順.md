@@ -91,7 +91,29 @@ python analysis\run_eval.py data\stems --model analysis\models\crnn_egmd_v5.onnx
 
 出てきた数字（E-GMD test の M0-1、区分 A の M0-1）を貼ってもらえれば、`docs/phase0/結果/` に記録する。M0-1 の目安は 0.85。
 
-## 5. うまくいかないとき
+## 5. 実ステムへの微調整（疑似ラベル、leave-one-out）
+
+E-GMD で学習したモデルは、CD 曲の分離済みステムでは取りこぼしが多い（E-GMD の検証 0.87 → 区分 A の疑似正解 0.56）。
+区分 A の疑似正解（`run_eval.py` が各曲のフォルダに書く `hits_pseudo.csv`。分離ツールのパート別ステムの打点検出）で短く学習し直し、
+実ステムに合わせる。正直に測るため、**曲ごとに「その曲以外の 9 曲で学習 → その曲で測る」**（leave-one-out）を繰り返す。
+
+```
+python analysis\run_eval.py data\stems --model analysis\models\crnn_egmd_v5.onnx --parts nmfd-oracle --out data\results\YYYY-MM-DD_nmfd_oracle.md
+python analysis\train_transcriber.py --finetune-stems data\stems --init-from analysis\models\crnn_egmd_v5.pt --holdout all --egmd D:\data\e-gmd-v1.0.0 --out analysis\models\crnn_ft_v5.onnx
+python analysis\run_eval.py data\stems --model "analysis\models\crnn_ft_v5_{id}.onnx" --parts nmfd --render --out data\results\YYYY-MM-DD_ft_nmfd.md
+```
+
+- 1 行目は、`hits_pseudo.csv` を最新の形式（先頭のコメント行に評価の開始位置・区間の長さ・ラベルのあるパート）で書き直すため。どの `run_eval.py` の実行でも書き直される（古い形式でも動くが、区間の決め方を `run_eval.py` と揃えるため）。
+- 2 行目が微調整。曲ごとに `crnn_ft_v5_<曲ID>.onnx`（と `.json`、`.pt`）、前後の表 `crnn_ft_v5_loo.md`、ログ `crnn_ft_v5.log.txt` が `analysis\models\` にできる。**`crnn_ft_v5_loo.md` を貼ってもらえれば記録する。**
+  - 既定: 6 エポック、学習率 1e-4、EMA なし、1 曲から 8 秒の区間を 40、E-GMD の train から 200 本（× 2 区間）を混ぜる（E-GMD を忘れないため。`--egmd` を省けば実ステムだけ）。E-GMD の validation 40 本 × 30 秒で忘れ具合も出す。
+  - 「前」と「後」のしきい値は、どちらも学習した 9 曲で種類ごとに選ぶ（評価曲は見ない）。前の数字は `run_eval.py` の表（v5 の ONNX のしきい値）と少し違う。
+  - パートの無い種類（タムのステムが無い曲のタム）は正解が無いので損失から外す。
+  - 時間の目安: 1 曲あたり数分（GPU）、10 曲で 1 時間前後。`--holdout a01` のように 1 曲だけでも試せる。`--holdout` を省くと 10 曲全部で学習し、`crnn_ft_v5.onnx` 1 つと当てはまりの表 `crnn_ft_v5_fit.md` を書く（汎化の目安にはならない。M0-2 の聞き比べ用）。
+  - `--init-from` は `train_egmd` のチェックポイント。v5 までの `.pt` は最終エポックの重み（ONNX は最良エポック）。v6 からは最良エポックが `.best.pt` にも残るので、そちらを渡す。
+- 3 行目は、曲ごとの微調整モデルで製品の経路（NMFD）を測る。`{id}` が曲 ID に置き換わる（PowerShell では引用符で囲む）。表の「推定」の列に `crnn_ft_v5_a01` のように出る。
+- **CD 曲のステムで学習したモデルは評価用に限る**（製品のモデルは権利の明確な音だけで作る。R3）。区分 B（正解 MIDI 付き）が揃えば、同じ仕組みで本当の正解でも学習できる。
+
+## 6. うまくいかないとき
 
 - `CUDA out of memory` → `--batch 4` か `--hidden 64`。
 - 学習が始まらない／ワーカーで止まる → `--workers 0`。

@@ -24,14 +24,14 @@ pip install -r analysis/requirements-ml.txt
 | `extract_kit.py` | 重ならない打の切り出し → 強さ別の層 → キット（M0-2 の材料） | `python analysis/extract_kit.py ステム.wav 打点.csv 出力先 --render 再現.wav` |
 | `fit_fx.py` | 固定の形のエフェクトチェーンの当てはめ（M0-3） | `python analysis/fit_fx.py 乾いた音.wav 目標.wav --out params.json --render 当てはめ後.wav` |
 | `pack_stems.py` | 分離したステムを受け渡し用に小さくする（モノラル 44.1 kHz FLAC、先頭 90 秒） | `python analysis/pack_stems.py 分離したWAVのフォルダ data/stems --seconds 90` |
-| `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト）。パート別ステム（キック.wav など）があれば疑似正解で F 値の目安を出し、パート別の切り出しも試す。`--model` で ONNX の採譜モデル、`--render` で聞き比べ用 WAV、`--parts nmfd` で自前のパート分け（製品の経路）、`--parts nmfd-oracle` で疑似正解の打点から NMFD（分離の上限）、`--nmfd-no-residual` で残差の成分なし |
+| `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト）。パート別ステム（キック.wav など）があれば疑似正解で F 値の目安を出し、パート別の切り出しも試す。`--model` で ONNX の採譜モデル、`--render` で聞き比べ用 WAV、`--parts nmfd` で自前のパート分け（製品の経路）、`--parts nmfd-oracle` で疑似正解の打点から NMFD（分離の上限）、`--nmfd-no-residual` で残差の成分なし。`--model` の `{id}` は曲 ID に置き換わる（曲ごとの微調整モデル） |
 | `separate_parts.py` | NMFD でドラムのステムをキック／スネア／ハイハット／シンバルに分ける（計画書 3.3 の (2)） | `python analysis/separate_parts.py ドラム.wav 打点.csv 出力先 --reference-dir パート別ステムのフォルダ` | `python analysis/run_eval.py data/stems --out data/results/2026-11-01.md` |
 | `list_itunes_library.py` | iTunes の書き出し（XML かテキスト）をジャンル別の一覧にする（区分 A の選曲用） | `python analysis/list_itunes_library.py ライブラリ.xml --out docs/phase0/itunes一覧.md` |
 | `make_eval_midi.py` | 区分 B の評価用 MIDI 曲（正解の打点・区間ラベル付き）を生成 | `python analysis/make_eval_midi.py --out analysis/eval_midi` |
 | `remap_midi_notes.py` | ドラムのノート番号をキットのパッド配置に付け替える（GM → Maschine／XO など） | `python analysis/remap_midi_notes.py song.mid out.mid --preset maschine16` |
 | `render_midi_synth.py` | song.mid を合成音で WAV にする（DAW で書き出す前の確認用） | `python analysis/render_midi_synth.py analysis/eval_midi/b01_rock/song.mid data/preview/b01_rock.wav` |
 | `make_demo_kit.py` | 合成音からデモ用のキット（kit.json と WAV）を作る（プラグインの確認用） | `python analysis/make_demo_kit.py data/kits/demo` |
-| `train_transcriber.py` | 小さな CRNN を学習し ONNX に書き出す。合成データ（`--steps`）か E-GMD（`--egmd`） | `python analysis/train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\stems --epochs 8 --out analysis/models/crnn_egmd_v1.onnx` |
+| `train_transcriber.py` | 小さな CRNN を学習し ONNX に書き出す。合成データ（`--steps`）か E-GMD（`--egmd`）。`--finetune-stems` で実ステムの疑似ラベルに合わせる微調整（`--holdout all` で leave-one-out） | `python analysis/train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\stems --epochs 8 --out analysis/models/crnn_egmd_v1.onnx` |
 | `eval_egmd.py` | ONNX の採譜モデルを E-GMD の test 分割で測る（正解は MIDI） | `python analysis/eval_egmd.py analysis/models/crnn_egmd_v1.onnx D:\data\e-gmd-v1.0.0` |
 | `transcribe_onnx.py` | ONNX の採譜モデルを ONNX Runtime で動かす | `python analysis/transcribe_onnx.py analysis/models/crnn_synth.onnx ステム.wav 推定.csv` |
 
@@ -70,7 +70,7 @@ pip install -r analysis/requirements-ml.txt
 
 - 特徴量は対数メル（22.05 kHz、窓 1024、ホップ 220 ≒ 10 ms、64 バンド）。numpy だけで書き、C++ に同じ計算を移せるようにしている。
 - モデルは小さな CRNN（畳み込み2段 → 双方向 GRU → 各フレーム・各種類の確率）。打点はしきい値と局所最大で拾う。
-- `train_transcriber.py` は、合成データ（`synth.py` の乱数パターン。道具立ての確認用）か E-GMD（`drumeval/egmd.py`。実データ、CC BY 4.0、5 種: kick/snare/hihat/tom/cymbal）で学習し、ONNX に書き出して ONNX Runtime と PyTorch の出力が一致することを確かめる。E-GMD の増強は音量・EQ・にじみ（ドラム以外のステムを混ぜる）・雑音・飽和・残響。手順は `docs/phase0/E-GMD学習の手順.md`。
+- `train_transcriber.py` は、合成データ（`synth.py` の乱数パターン。道具立ての確認用）か E-GMD（`drumeval/egmd.py`。実データ、CC BY 4.0、5 種: kick/snare/hihat/tom/cymbal）で学習し、ONNX に書き出して ONNX Runtime と PyTorch の出力が一致することを確かめる。E-GMD の増強は音量・EQ・にじみ（ドラム以外のステムを混ぜる）・雑音・飽和・残響。手順は `docs/phase0/E-GMD学習の手順.md`。`--finetune-stems data/stems --init-from <.pt> --holdout all` で、`run_eval.py` が書いた疑似正解（`hits_pseudo.csv`）で E-GMD のモデルを短く学習し直す（`drumeval/stems.py`。パートの無い種類は損失から外す。曲ごとの leave-one-out で前後の F を表にする）。CD 曲のステムで学習したモデルは評価用に限る（R3）。
 - 学習したモデル（`models/*.onnx`）は原則コミットしない。例外として、合成データで学習した小さな `crnn_synth_v0.onnx`（657 KB）は手元での比較用にコミットしてある。
 
 ## テスト

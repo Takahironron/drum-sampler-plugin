@@ -39,63 +39,9 @@ from drumeval.labels import M0_CLASSES, to_coarse  # noqa: E402
 from stft_distance import load_mono  # noqa: E402
 
 
-AUDIO_EXT = (".wav", ".flac", ".aif", ".aiff", ".ogg")
-
-
-def find_stem(song_dir: Path) -> Path | None:
-    """`drums.wav`／`drums.flac` を優先し、無ければフォルダ内の音声ファイルが 1 つだけならそれを使う。"""
-    for name in ("drums.wav", "drums.flac", "drum.wav", "drum.flac", "ドラム.wav"):
-        if (song_dir / name).exists():
-            return song_dir / name
-    # SpectraLayers の書き出し「<曲名>_ドラム.wav」
-    sl = [p for p in song_dir.iterdir() if p.suffix.lower() in AUDIO_EXT and p.stem.endswith("_ドラム")]
-    if len(sl) == 1:
-        return sl[0]
-    audio = [p for p in song_dir.iterdir() if p.suffix.lower() in AUDIO_EXT and not p.name.startswith("rerender")]
-    return audio[0] if len(audio) == 1 else None
-
-
-# パート別に分離されたステムの名前（SpectraLayers の日本語名と英語名）→ 種類
-PART_NAMES = {
-    "キック": "kick", "kick": "kick", "kicks": "kick",
-    "スネア": "snare", "snare": "snare",
-    "ハイハット": "hihat", "hihat": "hihat", "hi-hat": "hihat", "hats": "hihat",
-    "シンバル": "cymbal", "cymbal": "cymbal", "cymbals": "cymbal",
-    "タム": "tom", "tom": "tom", "toms": "tom",
-}
-
-
-def find_part_stems(song_dir: Path) -> dict[str, Path]:
-    """パート別ステム（キック.wav など）があれば 種類 → ファイル を返す。"""
-    out: dict[str, Path] = {}
-    for p in song_dir.iterdir():
-        if p.suffix.lower() not in AUDIO_EXT:
-            continue
-        key = p.stem.lower()
-        for name, cls in PART_NAMES.items():
-            if key == name.lower() or key.endswith("_" + name.lower()):
-                out[cls] = p
-    return out
-
-
-def detect_drum_start(x: np.ndarray, sr: int, win_sec: float = 1.0, rel_db: float = -15.0, hold: int = 3) -> float:
-    """ドラムが鳴り始める位置（秒）。1 秒窓の RMS が最大から rel_db 以内に `hold` 窓続けて入る最初の窓。見つからなければ 0。
-
-    混ざったドラムのステムには他の楽器の残りが入るので、できればキックとスネアのパート別ステムの合計を渡す（`evaluate_song` が行う）。
-    確実なのは曲フォルダの `start.txt`。
-    """
-    n = int(win_sec * sr)
-    if x.size < n * (hold + 1):
-        return 0.0
-    k = x.size // n
-    rms = np.sqrt(np.mean(x[: k * n].reshape(k, n) ** 2, axis=1) + 1e-12)
-    db = 20.0 * np.log10(rms)
-    thr = db.max() + rel_db
-    above = db > thr
-    for i in range(k - hold + 1):
-        if above[i : i + hold].all():
-            return i * win_sec
-    return 0.0
+from drumeval.stems import (  # noqa: E402,F401  (find_stem などは drumeval.stems に移した。ここからも使える)
+    AUDIO_EXT, PART_NAMES, detect_drum_start, find_part_stems, find_stem, read_start_override, resolve_start,
+)
 
 
 def pseudo_truth_from_parts(parts: dict[str, Path], max_seconds: float, sr_target: int | None, start_sec: float = 0.0) -> list[Hit]:
@@ -225,17 +171,6 @@ def parse_kit_size(text: str) -> dict[str, int]:
     return out
 
 
-def read_start_override(song_dir: Path) -> float | None:
-    """曲フォルダの `start.txt`（秒を 1 つ書く）があれば、その位置から評価する。"""
-    p = song_dir / "start.txt"
-    if p.exists():
-        try:
-            return float(p.read_text(encoding="utf-8").strip())
-        except ValueError:
-            return None
-    return None
-
-
 def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song_id: str | None = None, wav: Path | None = None,
                   model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: str = "24",
                   choke: str = "all", start_sec: float | None = None, fit_fx: bool = False, fit_seconds: float = 20.0,
@@ -243,19 +178,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
     wav = wav or find_stem(song_dir)
     x_full, sr = load_mono(str(wav), None)
     # 評価の開始位置: start.txt → --start → ドラムが鳴り始める位置の自動検出（キックとスネアのパート別ステムがあればその合計で）
-    start = read_start_override(song_dir)
-    if start is None:
-        if start_sec is not None:
-            start = start_sec
-        else:
-            parts_for_start = find_part_stems(song_dir)
-            probe = x_full
-            if "kick" in parts_for_start and "snare" in parts_for_start:
-                k, ksr = load_mono(str(parts_for_start["kick"]), sr)
-                s_, _ = load_mono(str(parts_for_start["snare"]), sr)
-                n = min(k.size, s_.size)
-                probe = k[:n] + s_[:n]
-            start = detect_drum_start(probe, sr)
+    start = resolve_start(song_dir, x_full, sr, start_sec, load=lambda path, target_sr: load_mono(str(path), target_sr)[0])
     x = x_full[int(start * sr) :]
     if max_seconds and x.size > max_seconds * sr:
         x = x[: int(max_seconds * sr)]
@@ -286,7 +209,9 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
         row["truth"] = "疑似（パート別ステム）"
         from drumeval import save_hits_csv
 
-        save_hits_csv(ref, song_dir / "hits_pseudo.csv")
+        # 先頭のコメント行に区間とラベルのあるパートを書く（微調整 `train_transcriber.py --finetune-stems` が読む）
+        save_hits_csv(ref, song_dir / "hits_pseudo.csv",
+                      meta={"start_sec": f"{start:.3f}", "seconds": f"{x.size / sr:.3f}", "parts": ",".join(sorted(parts))})
     if ref is not None:
         row["ref_counts"] = _counts(ref)
         scores = transcription_scores(ref, est)
@@ -466,6 +391,13 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
     return row
 
 
+def resolve_model_path(model: str | None, song_id: str) -> str | None:
+    """`--model` に `{id}` があれば曲 ID に置き換える（leave-one-out で曲ごとに別のモデルを使う: `crnn_ft_{id}.onnx`）。"""
+    if not model:
+        return None
+    return model.replace("{id}", song_id)
+
+
 def to_markdown(rows: list[dict], title: str) -> str:
     cols = ("id", "start", "seconds", "est_source", "truth", "parts_mode", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
             "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_gain_choke",
@@ -540,7 +472,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--est-dir", default=None, help="採譜の推定 CSV（<曲ID>.csv）の置き場")
     ap.add_argument("--max-seconds", type=float, default=60.0, help="評価に使う長さ（秒。0 で全部）")
     ap.add_argument("--start", type=float, default=None, help="評価の開始位置（秒）。省略時はドラムが鳴り始める位置を自動で検出。曲ごとに変えるなら曲フォルダに start.txt")
-    ap.add_argument("--model", default=None, help="ONNX の採譜モデル（指定すると基準値の代わりに使う。onnxruntime が要る）")
+    ap.add_argument("--model", default=None,
+                    help="ONNX の採譜モデル（指定すると基準値の代わりに使う。onnxruntime が要る）。`{id}` を含めると曲 ID に置き換える"
+                         "（leave-one-out の微調整モデルを曲ごとに使う。例: \"analysis\\models\\crnn_ft_v5_{id}.onnx\"。無い曲は飛ばす）")
     ap.add_argument("--render", action="store_true", help="聞き比べ用の WAV（original_cut / rerender_mix / rerender_parts_3x3 / rerender_parts / rerender_self / kit_parts_audition）を各曲のフォルダに書く")
     ap.add_argument("--threshold", type=float, default=None, help="--model の打点のしきい値（既定はモデルの設定、0.5）")
     ap.add_argument("--kit-size", default="24", help="方式 C で種類ごとに残す代表の音の数（既定 24）。種類別なら kick=48,snare=24,hihat=24,cymbal=24")
@@ -573,8 +507,12 @@ def main(argv: list[str] | None = None) -> int:
     rows = []
     for song_id, d, f in songs:
         est = Path(args.est_dir) / f"{song_id}.csv" if args.est_dir else None
+        model = resolve_model_path(args.model, song_id)
+        if model and not Path(model).exists():
+            print(f"{song_id}: モデルが無い（{model}）。飛ばす", file=sys.stderr)
+            continue
         print(f"{song_id} ({f.name}) ...", file=sys.stderr)
-        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke, start_sec=args.start,
+        rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke, start_sec=args.start,
                                   fit_fx=args.fit_fx, fit_seconds=args.fit_seconds, parts_mode=args.parts,
                                   save_kit_dir=args.save_kit, nmfd_residual=not args.nmfd_no_residual))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")

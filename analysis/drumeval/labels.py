@@ -125,12 +125,30 @@ def load_hits_csv(path: str | Path) -> list[Hit]:
     return hits
 
 
-def save_hits_csv(hits: Iterable[Hit], path: str | Path) -> None:
+def save_hits_csv(hits: Iterable[Hit], path: str | Path, meta: dict[str, object] | None = None) -> None:
+    """`meta` を渡すと、先頭に `# key=value key=value ...` のコメント行を書く（読むときは `load_hits_csv` が飛ばし、
+    `read_hits_csv_meta` が辞書にする）。例: 評価の開始位置と区間の長さ、ラベルのあるパート。"""
     with open(path, "w", newline="", encoding="utf-8") as f:
+        if meta:
+            f.write("# " + " ".join(f"{k}={v}" for k, v in meta.items()) + "\n")
         w = csv.writer(f)
         w.writerow(["time_sec", "class", "velocity"])
         for h in sorted(hits, key=lambda h: h.time):
             w.writerow([f"{h.time:.6f}", h.cls, "" if h.velocity is None else h.velocity])
+
+
+def read_hits_csv_meta(path: str | Path) -> dict[str, str]:
+    """CSV の先頭のコメント行（`# key=value ...`）を辞書にする。無ければ空。"""
+    with open(path, encoding="utf-8") as f:
+        first = f.readline()
+    if not first.startswith("#"):
+        return {}
+    out: dict[str, str] = {}
+    for tok in first[1:].split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
 
 
 def load_hits_midi(path: str | Path, note_map: dict[int, str] | None = None, channel: int | None = 9) -> list[Hit]:

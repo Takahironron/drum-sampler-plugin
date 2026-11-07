@@ -15,6 +15,10 @@ E-GMD（実データ。CC BY 4.0。GPU があれば自動で使う）::
   CD 曲のステムを混ぜたモデルは評価用に限る（製品のモデルには権利の明確な音だけを使う。R3）。
 - 出力: `<out>.onnx` と、特徴量の設定・種類・しきい値を書いた `<out>.json`。チェックポイント `<out>.pt` も毎エポック書く。
   エポックごとの検証の結果は `<out>.log.txt` に残る。
+微調整（実ステムの疑似ラベル。評価用ステムに合わせる。leave-one-out で曲ごとに前後を測る）::
+
+    python train_transcriber.py --finetune-stems data\\stems --init-from models/crnn_egmd_v5.pt --holdout all --egmd D:\\data\\e-gmd-v1.0.0 --out models/crnn_ft_v5.onnx
+
 - 検証: E-GMD の validation 分割から `--val-tracks` 本（先頭 `--val-seconds` 秒）で種類ごとの F 値を出し、しきい値 0.3〜0.8 のうち
   種類ごとに F が最も高いものを選んで ONNX の設定（`thresholds`）に書く。M0-1（kick/snare/hihat の F の平均）が最良のエポックを残す。
 - 特徴量と形: 64 メル帯域、周波数方向の縮小 2 回（v3 で 96 メル・縮小 1 回を試したが効かなかった）。v4 から、対数メルの時間差分を
@@ -27,6 +31,7 @@ import argparse
 import json
 import sys
 import time
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -326,11 +331,13 @@ def train_egmd(args) -> int:
         log(f"epoch {epoch}  loss {np.mean(losses):.4f}  検証（{len(val_examples)} 本 × {args.val_seconds:.0f} 秒）  ({time.time() - t_start:.0f}s):\n{format_scores(scores, classes)}\n"
             f"  種類別のしきい値 {thr_by_class}: " + " ".join(f"{c} {f_best[c]:.3f}" for c in classes) + f"  M0-1 {f_best['m0_1']:.3f}"
             f"（raw {cands['raw'][2]['m0_1']:.3f} / ema {cands['ema'][2]['m0_1']:.3f} → {best_name}）")
-        torch.save({"state_dict": model.state_dict(), "ema_state_dict": ema.state_dict(), "hidden": args.hidden, "layers": args.layers, "pools": args.pools,
-                    "delta": not args.no_delta, "classes": classes, "features": cfg.__dict__, "epoch": epoch}, out.with_suffix(".pt"))
+        ckpt = {"state_dict": model.state_dict(), "ema_state_dict": ema.state_dict(), "hidden": args.hidden, "layers": args.layers, "pools": args.pools,
+                "delta": not args.no_delta, "classes": classes, "features": cfg.__dict__, "epoch": epoch, "weights": best_name, "thresholds": thr_by_class}
+        torch.save(ckpt, out.with_suffix(".pt"))  # 最終エポック
         if f_best["m0_1"] > best_m0:
             best_m0, best_thr = f_best["m0_1"], thr_by_class
             chosen = ema if best_name == "ema" else model
+            torch.save(ckpt, out.with_suffix(".best.pt"))  # 最良エポック（ONNX と同じ重み。微調整の初期値に使う）
             export_onnx(chosen, cfg, classes, out, best_thr,
                         {"trained_on": "E-GMD (CC BY 4.0)" + (f" + synthetic {args.synthetic_ratio:g}" if args.synthetic_ratio else ""),
                          "epochs": epoch, "train_tracks": len(train), "kits": len(kits), "hidden": args.hidden, "layers": args.layers, "pools": args.pools,
@@ -338,6 +345,289 @@ def train_egmd(args) -> int:
                          "bleed_files": len(bleed), "val_m0_1": best_m0, "val_scores": {str(k): v for k, v in scores.items()}, "seed": args.seed})
             model.to(device)
     log(f"終了。最良の検証 M0-1 {best_m0:.3f}（しきい値 {best_thr}）。モデル: {out}。ログ: {log_path}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# 微調整（実ステムの疑似ラベル、leave-one-out）
+# ---------------------------------------------------------------------------
+
+def load_checkpoint(path: str | Path, device: str, weights: str = "auto"):
+    """`train_egmd` のチェックポイント（.pt / .best.pt）からモデルを作る。`weights`: raw / ema / auto（学習時に選ばれた方。無ければ raw）。"""
+    import torch
+
+    from drumeval.model import DrumCRNN
+
+    ck = torch.load(str(path), map_location=device)
+    cfg = FeatureConfig(**ck["features"])
+    classes = tuple(ck["classes"])
+    model = DrumCRNN(cfg.n_mels, len(classes), hidden=ck["hidden"], pools=ck.get("pools", 2), delta=ck.get("delta", True), layers=ck.get("layers", 1))
+    if weights == "auto":
+        weights = ck.get("weights", "raw")
+    model.load_state_dict(ck["ema_state_dict"] if weights == "ema" and "ema_state_dict" in ck else ck["state_dict"])
+    return model.to(device), cfg, classes, ck, weights
+
+
+def score_songs(predict, songs, feats, cfg: FeatureConfig, classes: tuple[str, ...], thresholds=THRESHOLDS) -> dict:
+    """曲ごとの採点。種類 c の F は、c のラベルがある曲だけで平均する（ラベルの無い種類は None）。
+    返り値: {しきい値: {種類: F か None, "m0_1": …}}。しきい値は種類ごとに別でもよい（辞書）。"""
+    probs = [predict(f) for f in feats]
+    out: dict = {}
+    for thr in thresholds:
+        per_class: dict[str, list[float]] = {c: [] for c in classes}
+        for prob, song in zip(probs, songs):
+            est = pick_hits(prob, cfg, classes, thr)
+            sc = transcription_scores(song.hits, est, classes)
+            for c in classes:
+                if c in song.labeled:
+                    per_class[c].append(sc[c].f_measure)
+        f = {c: (float(np.mean(v)) if v else None) for c, v in per_class.items()}
+        m0 = [f[c] for c in M0_CLASSES if f.get(c) is not None]
+        f["m0_1"] = float(np.mean(m0)) if m0 else None
+        out[thr if not isinstance(thr, dict) else "by_class"] = f
+    return out
+
+
+def score_at(predict, songs, feats, cfg: FeatureConfig, classes: tuple[str, ...], thr: float | dict[str, float]) -> dict:
+    """1 つのしきい値（1 つの値か種類別の辞書）での曲ごとの採点。"""
+    return next(iter(score_songs(predict, songs, feats, cfg, classes, (thr,)).values()))
+
+
+def pick_thresholds(scores: dict, classes: tuple[str, ...], fallback: dict[str, float] | float) -> dict[str, float]:
+    """種類ごとに F が最大のしきい値。ラベルの無い種類は `fallback`（チェックポイントのしきい値）。"""
+    out = {}
+    for c in classes:
+        cands = [(scores[t][c], t) for t in scores if scores[t][c] is not None]
+        if cands:
+            out[c] = float(max(cands)[1])
+        else:
+            out[c] = float(fallback.get(c, 0.5)) if isinstance(fallback, dict) else float(fallback)
+    return out
+
+
+def _fmt_f(f: dict | None, classes=M0_CLASSES) -> str:
+    if not f:
+        return "-"
+    return " ".join(f"{c} {f[c]:.3f}" if f.get(c) is not None else f"{c} -" for c in classes) + (f"  M0-1 {f['m0_1']:.3f}" if f.get("m0_1") is not None else "")
+
+
+class _WithMask:
+    """E-GMD の区間に「全種類ラベルあり」のマスクを付ける（`StemChunks` と同じ形にする）。"""
+
+    def __init__(self, ds, n_classes: int):
+        import torch
+
+        self.ds = ds
+        self.mask = torch.ones(n_classes)
+
+    def set_epoch(self, epoch: int) -> None:
+        self.ds.set_epoch(epoch)
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, i: int):
+        feat, y = self.ds[i]
+        return feat, y, self.mask
+
+
+def finetune_one(args, songs, holdout_id: str | None, egmd_train, egmd_val, bleed, device: str, log) -> dict:
+    """`holdout_id` 以外の曲で微調整し、`holdout_id` で前後を測る。返り値: 前後の採点と出力先。"""
+    import torch
+    import torch.nn.functional as F
+    from torch.utils.data import ConcatDataset, DataLoader
+
+    from drumeval.egmd import EGMDChunks, estimate_offset, load_audio
+    from drumeval.stems import StemChunks, song_examples
+
+    train_songs = [s for s in songs if s.song_id != holdout_id]
+    hold_songs = [s for s in songs if s.song_id == holdout_id]
+    model, cfg, classes, ck, weights = load_checkpoint(args.init_from, device, args.init_weights)
+    ck_thr = ck.get("thresholds")
+    if ck_thr is None:  # 古いチェックポイント（v5 まで）はしきい値を持たないので、横の json（ONNX の設定）から取る
+        meta_path = Path(args.init_from).with_name(Path(args.init_from).name.split(".")[0] + ".json")  # crnn_egmd_v5.best.pt → crnn_egmd_v5.json
+        if meta_path.exists():
+            ck_thr = json.loads(meta_path.read_text(encoding="utf-8")).get("thresholds")
+    ck_thr = ck_thr or 0.5
+    torch.manual_seed(args.seed)
+
+    train_feats = [f for f, _ in song_examples(train_songs, cfg)]
+    hold_feats = [f for f, _ in song_examples(hold_songs, cfg)]
+
+    def make_predict(net):
+        def predict(feat: np.ndarray) -> np.ndarray:
+            net.eval()
+            with torch.no_grad():
+                p = net(torch.from_numpy(feat[None]).to(device))[0].cpu().numpy()
+            net.train()
+            return p
+        return predict
+
+    predict = make_predict(model)
+
+    def evaluate() -> dict:
+        sc_train = score_songs(predict, train_songs, train_feats, cfg, classes)
+        thr = pick_thresholds(sc_train, classes, ck_thr)
+        r = {"thresholds": thr, "train": score_at(predict, train_songs, train_feats, cfg, classes, thr)}
+        if hold_songs:
+            r["holdout"] = score_at(predict, hold_songs, hold_feats, cfg, classes, thr)
+            r["holdout_ckpt_thr"] = score_at(predict, hold_songs, hold_feats, cfg, classes, ck_thr)
+        if egmd_val:
+            r["egmd"] = score_with_thresholds(predict, egmd_val, cfg, classes, thr)
+        return r
+
+    tag = holdout_id or "all"
+    log(f"[{tag}] 学習 {len(train_songs)} 曲（{', '.join(s.song_id for s in train_songs)}）"
+        + (f"、評価 {holdout_id}" if holdout_id else "、評価は学習した曲（当てはまりだけ）")
+        + f"、初期値 {Path(args.init_from).name}（{weights}）、E-GMD の混ぜ込み {len(egmd_train)} 本、device={device}")
+    # ラベルと音声のずれの見積もり（分離ツールのパートの打点検出が遅れていないか）
+    offs = []
+    for s_ in train_songs[:10]:
+        x = load_audio(s_.audio, cfg.sr, s_.start, min(s_.seconds, 30.0))
+        offs.append(f"{s_.song_id} {estimate_offset(x, cfg.sr, [h for h in s_.hits if h.time < x.size / cfg.sr], cfg) * 1000:+.0f} ms")
+    log(f"[{tag}] ラベルのずれの見積もり（正なら音声が遅い）: " + ", ".join(offs))
+    before = evaluate()
+    log(f"[{tag}] 前: 学習曲 {_fmt_f(before['train'])}" + (f" / 評価曲 {_fmt_f(before.get('holdout'))}（初期値のしきい値では {_fmt_f(before.get('holdout_ckpt_thr'))}）" if hold_songs else "")
+        + (f" / E-GMD 検証 M0-1 {before['egmd']['m0_1']:.3f}" if egmd_val else "") + f"  しきい値 {before['thresholds']}")
+
+    ds_stems = StemChunks(train_songs, cfg, chunk_sec=args.seconds, chunks_per_song=args.chunks_per_song, bleed_files=bleed,
+                          do_augment=not args.no_augment, classes=classes, seed=args.seed)
+    parts = [ds_stems]
+    if egmd_train:
+        parts.append(_WithMask(EGMDChunks(egmd_train, cfg, chunk_sec=args.seconds, chunks_per_track=args.chunks_per_track, bleed_files=bleed,
+                                          do_augment=not args.no_augment, classes=classes, seed=args.seed, synthetic_ratio=args.synthetic_ratio), len(classes)))
+    dl = DataLoader(ConcatDataset(parts), batch_size=args.batch, shuffle=True, num_workers=args.workers, drop_last=True,
+                    persistent_workers=args.workers > 0)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    total_steps = max(len(dl) * args.epochs, 1)
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=total_steps, pct_start=0.3)
+    pos_weight = torch.tensor([6.0, 8.0, 8.0, 8.0, 4.0][: len(classes)], device=device)
+    t_start = time.time()
+    step = 0
+    for epoch in range(1, args.epochs + 1):
+        for d in parts:
+            d.set_epoch(epoch)
+        model.train()
+        losses = []
+        for xb, yb, mb in dl:
+            xb, yb, mb = xb.to(device), yb.to(device), mb.to(device)
+            prob = model(xb)
+            w = (1.0 + (pos_weight - 1.0) * yb) * mb[:, None, :]  # ラベルの無い種類は損失に入れない
+            loss = (F.binary_cross_entropy(prob, yb, reduction="none") * w).sum() / w.sum().clamp(min=1.0)
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            opt.step()
+            sched.step()
+            losses.append(loss.item())
+            step += 1
+        r = evaluate()
+        log(f"[{tag}] epoch {epoch}/{args.epochs}  loss {np.mean(losses):.4f}  学習曲 {_fmt_f(r['train'])}"
+            + (f" / 評価曲 {_fmt_f(r.get('holdout'))}" if hold_songs else "") + (f" / E-GMD 検証 M0-1 {r['egmd']['m0_1']:.3f}" if egmd_val else "")
+            + f"  ({time.time() - t_start:.0f}s)")
+    after = evaluate()
+    out = Path(args.out)
+    if holdout_id:
+        out = out.with_name(f"{out.stem}_{holdout_id}{out.suffix}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    export_onnx(model, cfg, classes, out, after["thresholds"],
+                {"trained_on": "E-GMD (CC BY 4.0) + fine-tuned on evaluation stems with pseudo labels (evaluation only; R3)",
+                 "init_from": str(Path(args.init_from).name), "init_weights": weights, "holdout": holdout_id,
+                 "train_songs": [s.song_id for s in train_songs], "epochs": args.epochs, "lr": args.lr, "chunks_per_song": args.chunks_per_song,
+                 "egmd_tracks": len(egmd_train), "before": {k: v for k, v in before.items() if k != "thresholds"},
+                 "after": {k: v for k, v in after.items() if k != "thresholds"}, "seed": args.seed})
+    torch.save({"state_dict": model.state_dict(), "hidden": ck["hidden"], "layers": ck.get("layers", 1), "pools": ck.get("pools", 2), "delta": ck.get("delta", True),
+                "classes": classes, "features": cfg.__dict__, "epoch": args.epochs, "weights": "raw", "thresholds": after["thresholds"],
+                "init_from": str(args.init_from), "holdout": holdout_id}, out.with_suffix(".pt"))
+    return {"holdout": holdout_id, "before": before, "after": after, "out": out}
+
+
+def finetune_stems(args) -> int:
+    """`--finetune-stems`: 実ステムの疑似ラベル（`run_eval.py` が書く hits_pseudo.csv）で、E-GMD のモデルを短く学習し直す。
+
+    `--holdout all` なら曲ごとに「その曲以外で学習 → その曲で測る」を繰り返し（leave-one-out）、曲ごとのモデル
+    `<out>_<曲ID>.onnx` と前後の表 `<out>_loo.md` を書く。`run_eval.py --model "<out>_{id}.onnx"` で曲ごとに使える。
+    """
+    from drumeval.egmd import collect_bleed_files, read_index
+    from drumeval.stems import read_stem_songs
+
+    device = pick_device(args.device)
+    ids = [t.strip() for t in args.song_ids.split(",") if t.strip()] if args.song_ids else None
+    songs = read_stem_songs(args.finetune_stems, ids, max_seconds=args.max_seconds)
+    if len(songs) < 2:
+        print(f"疑似正解（hits_pseudo.csv）か正解のある曲が 2 曲以上要る（{args.finetune_stems}: {len(songs)} 曲）。先に run_eval.py を走らせる", file=sys.stderr)
+        return 1
+    rng = np.random.default_rng(args.seed)
+    egmd_train, egmd_val = [], []
+    if args.egmd:
+        import torch
+
+        tracks = read_index(args.egmd)
+        tr = [t for t in tracks if t.split == "train"]
+        va = [t for t in tracks if t.split == "validation"] or [t for t in tracks if t.split == "test"]
+        rng.shuffle(tr)  # type: ignore[arg-type]
+        rng.shuffle(va)  # type: ignore[arg-type]
+        egmd_train = tr[: args.max_tracks] if args.max_tracks else tr
+        print("E-GMD の検証データを読む...", flush=True)
+        cfg0 = FeatureConfig(**torch.load(str(args.init_from), map_location="cpu")["features"])
+        egmd_val = load_eval_examples(va[: args.val_tracks], cfg0, args.val_seconds)
+    bleed = collect_bleed_files(args.bleed_dir) if args.bleed_dir else []
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    log_path = out.with_suffix(".log.txt")
+    log_path.write_text(f"微調整: {args.finetune_stems} の {len(songs)} 曲（{', '.join(s.song_id for s in songs)}）、初期値 {args.init_from}、"
+                        f"holdout {args.holdout or 'なし'}、epochs {args.epochs}、lr {args.lr}、chunks_per_song {args.chunks_per_song}、"
+                        f"E-GMD {len(egmd_train)} 本、にじみ {len(bleed)} 本\n", encoding="utf-8")
+
+    def log(msg: str) -> None:
+        print(msg, flush=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+
+    for s_ in songs:
+        log(f"  {s_.song_id}: {s_.audio.name}、開始 {s_.start:.1f} 秒、{s_.seconds:.0f} 秒、打 {len(s_.hits)}、ラベルのある種類 {','.join(s_.labeled)}（{s_.truth}）")
+    if args.holdout == "all":
+        holdouts: list[str | None] = [s_.song_id for s_ in songs]
+    elif args.holdout:
+        holdouts = [t.strip() for t in args.holdout.split(",") if t.strip()]
+        unknown = [h for h in holdouts if h not in {s_.song_id for s_ in songs}]
+        if unknown:
+            print(f"--holdout に無い曲 ID: {unknown}", file=sys.stderr)
+            return 1
+    else:
+        holdouts = [None]
+    results = [finetune_one(args, songs, h, egmd_train, egmd_val, bleed, device, log) for h in holdouts]
+
+    # まとめの表（leave-one-out なら評価曲の前後。holdout 無しなら学習曲の当てはまり）
+    lines = [f"# 微調整の結果（{date.today().isoformat()}。初期値 {Path(args.init_from).name}、{len(songs)} 曲、epochs {args.epochs}、lr {args.lr}）", ""]
+    key = "holdout" if holdouts != [None] else "train"
+    head = "| 曲ID | 前 kick | 前 snare | 前 hihat | 前 M0-1 | 後 kick | 後 snare | 後 hihat | 後 M0-1 | 差 |" + (" E-GMD 検証 前→後 |" if egmd_val else "")
+    lines += [head, "|---" * (10 + (1 if egmd_val else 0)) + "|"]
+    sums = {"before": [], "after": []}
+    for r in results:
+        b, a = r["before"][key], r["after"][key]
+        if b.get("m0_1") is not None and a.get("m0_1") is not None:
+            sums["before"].append(b["m0_1"])
+            sums["after"].append(a["m0_1"])
+        cells = [r["holdout"] or "（学習曲の当てはまり）"]
+        cells += [f"{b[c]:.3f}" if b.get(c) is not None else "-" for c in M0_CLASSES] + [f"{b['m0_1']:.3f}" if b.get("m0_1") is not None else "-"]
+        cells += [f"{a[c]:.3f}" if a.get(c) is not None else "-" for c in M0_CLASSES] + [f"{a['m0_1']:.3f}" if a.get("m0_1") is not None else "-"]
+        cells.append(f"{a['m0_1'] - b['m0_1']:+.3f}" if b.get("m0_1") is not None and a.get("m0_1") is not None else "-")
+        if egmd_val:
+            cells.append(f"{r['before']['egmd']['m0_1']:.3f} → {r['after']['egmd']['m0_1']:.3f}")
+        lines.append("| " + " | ".join(cells) + " |")
+    if sums["before"]:
+        lines.append(f"| 平均 | | | | {np.mean(sums['before']):.3f} | | | | {np.mean(sums['after']):.3f} | {np.mean(sums['after']) - np.mean(sums['before']):+.3f} |" + (" |" if egmd_val else ""))
+    lines += ["",
+              "- 「前」は初期値のモデル、「後」は微調整したモデル。しきい値はどちらも学習した曲で種類ごとに選ぶ（評価曲は見ない）。",
+              "- 疑似正解（分離ツールのパート別ステムの打点検出）に対する F 値なので目安。" + ("評価曲はその曲を学習から外したモデル（leave-one-out）で測った。" if key == "holdout" else "holdout 無しなので当てはまりの数字で、汎化の目安にはならない。"),
+              f"- 曲ごとのモデル: `{Path(args.out).stem}_<曲ID>.onnx`。`run_eval.py --model \"{Path(args.out).with_suffix('')}_{{id}}.onnx\"` で曲ごとに使う。" if key == "holdout" else f"- モデル: `{args.out}`。",
+              "- CD 曲のステムで学習したモデルは評価用に限る（製品のモデルには権利の明確な音だけを使う。R3）。"]
+    summary = "\n".join(lines) + "\n"
+    summary_path = out.with_name(f"{out.stem}_loo.md" if key == "holdout" else f"{out.stem}_fit.md")
+    summary_path.write_text(summary, encoding="utf-8")
+    print(summary)
+    log(f"終了。まとめ: {summary_path}。ログ: {log_path}")
     return 0
 
 
@@ -369,7 +659,35 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--val-seconds", type=float, default=30.0)
     ap.add_argument("--no-augment", action="store_true")
     ap.add_argument("--synthetic-ratio", type=float, default=0.15, help="E-GMD の区間の代わりに合成音（電子系のキックを含む）を返す割合（E-GMD のとき）")
+    # 微調整（実ステムの疑似ラベル）
+    ap.add_argument("--finetune-stems", default=None, metavar="DIR",
+                    help="評価用ステムのフォルダ（data/stems）。run_eval.py が書いた hits_pseudo.csv（か正解の hits.csv／.mid）のある曲で、"
+                         "--init-from のモデルを短く学習し直す。--egmd を併せて渡すと E-GMD の区間も混ぜる（忘れ防止。--max-tracks 本、既定 200）")
+    ap.add_argument("--init-from", default=None, help="初期値のチェックポイント（train_egmd の .best.pt か .pt）。微調整では必須")
+    ap.add_argument("--init-weights", default="auto", choices=("auto", "raw", "ema"), help="チェックポイントの生の重みか EMA か（auto は学習時に選ばれた方）")
+    ap.add_argument("--holdout", default=None, help="評価に回す曲 ID（コンマ区切り）。all なら曲ごとに leave-one-out。省略すると全曲で学習（当てはまりだけ出る）")
+    ap.add_argument("--song-ids", default=None, help="微調整に使う曲 ID をコンマ区切りで絞る（省略で全曲）")
+    ap.add_argument("--chunks-per-song", type=int, default=40, help="1 曲から 1 エポックに切り出す区間の数（微調整）")
+    ap.add_argument("--max-seconds", type=float, default=60.0, help="古い hits_pseudo.csv（コメント行なし）の区間の長さ（run_eval.py の既定と同じ）")
     args = ap.parse_args(argv)
+    if args.finetune_stems:
+        if not args.init_from:
+            print("--finetune-stems には --init-from（初期値の .pt）が要る", file=sys.stderr)
+            return 2
+        # 微調整の既定: 短く・小さい学習率・EMA なし・E-GMD は少なめ
+        if args.epochs == 16:
+            args.epochs = 6
+        if args.lr == 1e-3:
+            args.lr = 1e-4
+        if args.ema == 0.999:
+            args.ema = 0.0
+        if args.max_tracks == 8000:
+            args.max_tracks = 200  # × chunks_per_track 2 = 400 区間。実ステム 9 曲 × 40 区間と同じくらい
+        if args.val_tracks == 160:
+            args.val_tracks = 40
+        if args.seconds == 6.0:
+            args.seconds = 8.0
+        return finetune_stems(args)
     if args.egmd:
         if args.hidden == 48:
             args.hidden = 160
