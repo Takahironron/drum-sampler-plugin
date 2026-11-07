@@ -47,7 +47,8 @@
 |---|---|---|
 | Phase 1 の作業順（この文書） | 済 | 2026-11-03 |
 | 区分 B の評価用ステム | 未 | Takahiro の DAW で |
-| NMFD の試作 | 済（合成音で確認。実ステムは未） | `analysis/drumeval/nmfd.py`、`separate_parts.py`、`run_eval.py --parts nmfd`。合成音: スネア 19 dB、ハイハット 50 dB、キック 9 dB、シンバル 0 dB 前後 |
+| NMFD の試作 | 済（合成音と実ステム） | `analysis/drumeval/nmfd.py`、`separate_parts.py`、`run_eval.py --parts nmfd`。合成音: スネア 19 dB、ハイハット 50 dB、キック 9 dB、シンバル 0 dB 前後。実ステム（`docs/phase0/結果/2026-11-12_NMFD実ステム.md`）: キック +11.5 dB、スネア +2.1、ハイハット −0.2、シンバル −2.2。聞き比べは「良好」。再現の距離は自己再現 3.21・方式 C 3.72（SpectraLayers の経路は 0.20・1.29）で、差は採譜の取りこぼし。切り分け用に `--parts nmfd-oracle`（疑似正解の打点で NMFD の上限）と `--nmfd-no-residual` を追加（実ステムは未） |
+| 採譜の実ステムへの適応（疑似ラベルの微調整、leave-one-out） | 実装中 | `train_transcriber.py --finetune-stems`。CD 曲のステムで学習したモデルは評価用に限る（R3） |
 | 採譜 v6（E-GMD 全データ） | 未 | |
 | JUCE の KitModel と SampleVoice | 済 | `plugin/Source/KitModel.*`、`SampleEngine.*`。Python の `kit.json` を読み、層・ラウンドロビン・音量合わせ・チョークで鳴らす。`KitRenderTest` で DAW 無しの通し、Linux の pluginval（画面のテスト除く）SUCCESS。CI で Python → C++ の受け渡しを毎回通す |
 | ONNX Runtime の試作 | 未 | |

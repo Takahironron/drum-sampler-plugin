@@ -239,7 +239,7 @@ def read_start_override(song_dir: Path) -> float | None:
 def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song_id: str | None = None, wav: Path | None = None,
                   model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: str = "24",
                   choke: str = "all", start_sec: float | None = None, fit_fx: bool = False, fit_seconds: float = 20.0,
-                  parts_mode: str = "sl", save_kit_dir: str | None = None) -> dict:
+                  parts_mode: str = "sl", save_kit_dir: str | None = None, nmfd_residual: bool = True) -> dict:
     wav = wav or find_stem(song_dir)
     x_full, sr = load_mono(str(wav), None)
     # 評価の開始位置: start.txt → --start → ドラムが鳴り始める位置の自動検出（キックとスネアのパート別ステムがあればその合計で）
@@ -321,16 +321,21 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             sl_parts[c] = (px[: x.size], psr)
     part_audio: dict[str, tuple[np.ndarray, int]] = {}
     ref_v: list[Hit] = []
+    nmfd_hits = None
     if parts_mode == "nmfd" and est:
+        nmfd_hits = est  # 製品の経路: モデルの打点
+    elif parts_mode == "nmfd-oracle" and ref is not None:
+        nmfd_hits = ref  # NMFD の上限: 疑似正解の打点（分離の質だけを見る）
+    if nmfd_hits:
         from drumeval.nmfd import NMFDConfig, separate, snr_db
 
-        ncfg = NMFDConfig(n_fft=2048 if sr >= 40000 else 1024, hop=512 if sr >= 40000 else 256)
-        sep = separate(x, sr, est, ncfg)
+        ncfg = NMFDConfig(n_fft=2048 if sr >= 40000 else 1024, hop=512 if sr >= 40000 else 256, residual=nmfd_residual)
+        sep = separate(x, sr, nmfd_hits, ncfg)
         part_audio = {c: (sep[c], sr) for c in ("kick", "snare", "hihat", "cymbal")}
         if sl_parts:
             row["nmfd_snr"] = " ".join(f"{c[:2]}{snr_db(sl_parts[c][0], sep[c]):+.1f}" for c in part_audio if c in sl_parts)
         for c, (px, psr) in part_audio.items():
-            own_hits = [h for h in est if to_coarse(h.cls) == c]
+            own_hits = [h for h in nmfd_hits if to_coarse(h.cls) == c]
             if own_hits:
                 ref_v += estimate_velocities(own_hits, None, px, psr)
         ref_v.sort(key=lambda h: h.time)
@@ -355,6 +360,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             total[: px.size] += px
         row["stft_parts_sum"] = multi_resolution_stft_distance(x, _match_rms(total, x))["total"]  # 分離の整合性（0 に近いほどパートの和が元に等しい）
         write_hits_midi(ref_v, song_dir / ("hits_model.mid" if parts_mode == "nmfd" else "hits_pseudo.mid"))  # DAW で確かめる用
+        row["parts_mode"] = parts_mode + ("" if nmfd_residual or not parts_mode.startswith("nmfd") else "（残差なし）")
         ys = _match_rms(self_render_from_parts(part_audio, ref_v, x.size / sr), x)
         row["stft_self"] = multi_resolution_stft_distance(x, ys)["total"]  # 自己再現: 打点の誤りと区間の切り方だけの損失
         # 各打の「自分の区間」から、元の音量と特徴（音量・減衰・明るさ）を取る
@@ -461,11 +467,11 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
 
 
 def to_markdown(rows: list[dict], title: str) -> str:
-    cols = ("id", "start", "seconds", "est_source", "truth", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
+    cols = ("id", "start", "seconds", "est_source", "truth", "parts_mode", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
             "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_gain_choke",
             "kit_features", "stft_parts_features_all", "stft_parts_features_hihat", "stft_parts_features_none", "stft_parts_ceiling",
             "stft_parts_embed", "stft_parts_embed_ceiling", "loss_shares", "stft_self", "stft_parts_sum", "nmfd_snr", "fx_before", "fx_after", "fx_params")
-    heads = ("曲ID", "開始秒", "秒", "推定", "正解の種類", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
+    heads = ("曲ID", "開始秒", "秒", "推定", "正解の種類", "パートの出どころ", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
              "重ならない打（混合）", "層/音（混合）", "STFT（混合）", "重ならない打（パート別）", "層/音（パート別 3層×3音）", "STFT（A: 3層×3音）",
              "STFT（B: A＋音量合わせ＋チョーク）", "音の数（C: 特徴で選ぶ）", "STFT（C: チョーク全部）", "STFT（C: ハイハットだけ）", "STFT（C: チョーク無し）",
              "STFT（上限: 全部を代表・自分以外）", "STFT（D: 埋め込みで選ぶ）", "STFT（D の上限）",
@@ -540,8 +546,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--kit-size", default="24", help="方式 C で種類ごとに残す代表の音の数（既定 24）。種類別なら kick=48,snare=24,hihat=24,cymbal=24")
     ap.add_argument("--choke", choices=sorted(CHOKE_POLICIES), default="all", help="rerender_parts.wav に使うチョークの方針（表には 3 通りとも出る）")
     ap.add_argument("--only", default=None, help="曲 ID をコンマ区切りで指定すると、その曲だけ評価する（例: a01,a07）")
-    ap.add_argument("--parts", choices=("sl", "nmfd"), default="sl",
-                    help="パート別の切り出しに使うパート: sl = 分離ツールのパート別ステムと疑似正解、nmfd = 推定の打点を初期値にした NMFD（製品の経路）")
+    ap.add_argument("--parts", choices=("sl", "nmfd", "nmfd-oracle"), default="sl",
+                    help="パート別の切り出しに使うパート: sl = 分離ツールのパート別ステムと疑似正解、nmfd = 推定の打点を初期値にした NMFD（製品の経路）、"
+                         "nmfd-oracle = 疑似正解の打点を初期値にした NMFD（分離の質だけを見る上限）")
+    ap.add_argument("--nmfd-no-residual", action="store_true", help="NMFD で残差の成分を使わない（パートの和を元に等しくする）")
     ap.add_argument("--save-kit", default=None, metavar="DIR",
                     help="方式 C のキット（代表音の WAV と kit.json）を各曲のフォルダの DIR に保存する（プラグインで読める。例: kit）")
     ap.add_argument("--fit-fx", action="store_true", help="M0-3 を実ステムで測る: 合成キットの乾いた音に固定チェーンを当てはめ、前後の距離を出す（1 曲 2〜3 分）")
@@ -568,7 +576,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{song_id} ({f.name}) ...", file=sys.stderr)
         rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=args.model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke, start_sec=args.start,
                                   fit_fx=args.fit_fx, fit_seconds=args.fit_seconds, parts_mode=args.parts,
-                                  save_kit_dir=args.save_kit))
+                                  save_kit_dir=args.save_kit, nmfd_residual=not args.nmfd_no_residual))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
