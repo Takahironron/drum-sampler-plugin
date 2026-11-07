@@ -106,8 +106,9 @@ def test_finetune_leave_one_out(tmp_path):
     out = tmp_path / "models" / "ft.onnx"
     r = subprocess.run([sys.executable, str(ROOT / "train_transcriber.py"), "--finetune-stems", str(stems), "--init-from", str(ckpt),
                         "--holdout", "s02,s03", "--epochs", "1", "--batch", "2", "--seconds", "3", "--chunks-per-song", "2", "--workers", "0",
-                        "--out", str(out)], capture_output=True, text=True)
+                        "--mix-init", "0.5", "--out", str(out)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+    assert "初期値の重みを 0.5 の割合で混ぜた" in r.stdout
     for h in ("s02", "s03"):
         m = out.with_name(f"ft_{h}.onnx")
         assert m.exists() and m.with_suffix(".json").exists() and m.with_suffix(".pt").exists()
@@ -117,7 +118,7 @@ def test_finetune_leave_one_out(tmp_path):
         assert meta["holdout"] == h and h not in meta["train_songs"] and len(meta["train_songs"]) == 2
         assert "evaluation only" in meta["trained_on"] and set(meta["thresholds"]) == set(CLASSES5)
     summary = (out.with_name("ft_loo.md")).read_text(encoding="utf-8")
-    assert "| s02 |" in summary and "| s03 |" in summary and "| 平均 |" in summary
+    assert "| s02 |" in summary and "| s03 |" in summary and "| 平均 |" in summary and "前（初期値のしきい値）" in summary
     assert "ラベルのずれの見積もり" in r.stdout
     # 曲ごとのモデルを run_eval で使う（{id} の置き換え。モデルの無い s01 は飛ばす）
     r = subprocess.run([sys.executable, str(ROOT / "run_eval.py"), str(stems), "--max-seconds", "10", "--model", str(out.with_name("ft_{id}.onnx")),
@@ -147,6 +148,7 @@ def test_finetune_with_egmd_mix(tmp_path):
                         "--epochs", "1", "--batch", "2", "--seconds", "3", "--chunks-per-song", "2", "--workers", "0", "--out", str(out)],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert "E-GMD の混ぜ込み 2 本" in r.stdout and "E-GMD 検証 M0-1" in r.stdout
+    assert "E-GMD の混ぜ込み 2 本" in r.stdout and "E-GMD 検証 M0-1" in r.stdout and "初期値のしきい値では" in r.stdout
+    assert "E-GMD 検証（初期値のしきい値）前→後" in (tmp_path / "ft_fit.md").read_text(encoding="utf-8")
     assert out.exists() and (tmp_path / "ft_fit.md").exists()  # holdout 無し: 当てはまりの表
     assert "（学習曲の当てはまり）" in (tmp_path / "ft_fit.md").read_text(encoding="utf-8")

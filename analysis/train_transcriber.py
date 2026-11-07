@@ -474,6 +474,7 @@ def finetune_one(args, songs, holdout_id: str | None, egmd_train, egmd_val, blee
             r["holdout_ckpt_thr"] = score_at(predict, hold_songs, hold_feats, cfg, classes, ck_thr)
         if egmd_val:
             r["egmd"] = score_with_thresholds(predict, egmd_val, cfg, classes, thr)
+            r["egmd_ckpt_thr"] = score_with_thresholds(predict, egmd_val, cfg, classes, ck_thr)  # 初期値のしきい値（しきい値の違いと忘れ具合を分ける）
         return r
 
     tag = holdout_id or "all"
@@ -488,7 +489,10 @@ def finetune_one(args, songs, holdout_id: str | None, egmd_train, egmd_val, blee
     log(f"[{tag}] ラベルのずれの見積もり（正なら音声が遅い）: " + ", ".join(offs))
     before = evaluate()
     log(f"[{tag}] 前: 学習曲 {_fmt_f(before['train'])}" + (f" / 評価曲 {_fmt_f(before.get('holdout'))}（初期値のしきい値では {_fmt_f(before.get('holdout_ckpt_thr'))}）" if hold_songs else "")
-        + (f" / E-GMD 検証 M0-1 {before['egmd']['m0_1']:.3f}" if egmd_val else "") + f"  しきい値 {before['thresholds']}")
+        + (f" / E-GMD 検証 M0-1 {before['egmd']['m0_1']:.3f}（初期値のしきい値では {before['egmd_ckpt_thr']['m0_1']:.3f}）" if egmd_val else "") + f"  しきい値 {before['thresholds']}")
+    import copy
+
+    init_state = copy.deepcopy(model.state_dict()) if args.mix_init > 0 else None
 
     ds_stems = StemChunks(train_songs, cfg, chunk_sec=args.seconds, chunks_per_song=args.chunks_per_song, bleed_files=bleed,
                           do_augment=not args.no_augment, classes=classes, seed=args.seed)
@@ -525,6 +529,14 @@ def finetune_one(args, songs, holdout_id: str | None, egmd_train, egmd_val, blee
         log(f"[{tag}] epoch {epoch}/{args.epochs}  loss {np.mean(losses):.4f}  学習曲 {_fmt_f(r['train'])}"
             + (f" / 評価曲 {_fmt_f(r.get('holdout'))}" if hold_songs else "") + (f" / E-GMD 検証 M0-1 {r['egmd']['m0_1']:.3f}" if egmd_val else "")
             + f"  ({time.time() - t_start:.0f}s)")
+    if init_state is not None:
+        # 初期値との重みの混合（robust fine-tuning。学習した曲に寄り過ぎるのを抑え、初期値が良かった曲の性能を残す）
+        with torch.no_grad():
+            sd = model.state_dict()
+            for k, v in sd.items():
+                if v.is_floating_point():
+                    v.copy_(args.mix_init * init_state[k].to(v.device) + (1.0 - args.mix_init) * v)
+        log(f"[{tag}] 初期値の重みを {args.mix_init:g} の割合で混ぜた")
     after = evaluate()
     out = Path(args.out)
     if holdout_id:
@@ -533,7 +545,7 @@ def finetune_one(args, songs, holdout_id: str | None, egmd_train, egmd_val, blee
     export_onnx(model, cfg, classes, out, after["thresholds"],
                 {"trained_on": "E-GMD (CC BY 4.0) + fine-tuned on evaluation stems with pseudo labels (evaluation only; R3)",
                  "init_from": str(Path(args.init_from).name), "init_weights": weights, "holdout": holdout_id,
-                 "train_songs": [s.song_id for s in train_songs], "epochs": args.epochs, "lr": args.lr, "chunks_per_song": args.chunks_per_song,
+                 "train_songs": [s.song_id for s in train_songs], "epochs": args.epochs, "lr": args.lr, "chunks_per_song": args.chunks_per_song, "mix_init": args.mix_init,
                  "egmd_tracks": len(egmd_train), "before": {k: v for k, v in before.items() if k != "thresholds"},
                  "after": {k: v for k, v in after.items() if k != "thresholds"}, "seed": args.seed})
     torch.save({"state_dict": model.state_dict(), "hidden": ck["hidden"], "layers": ck.get("layers", 1), "pools": ck.get("pools", 2), "delta": ck.get("delta", True),
@@ -601,25 +613,34 @@ def finetune_stems(args) -> int:
     # まとめの表（leave-one-out なら評価曲の前後。holdout 無しなら学習曲の当てはまり）
     lines = [f"# 微調整の結果（{date.today().isoformat()}。初期値 {Path(args.init_from).name}、{len(songs)} 曲、epochs {args.epochs}、lr {args.lr}）", ""]
     key = "holdout" if holdouts != [None] else "train"
-    head = "| 曲ID | 前 kick | 前 snare | 前 hihat | 前 M0-1 | 後 kick | 後 snare | 後 hihat | 後 M0-1 | 差 |" + (" E-GMD 検証 前→後 |" if egmd_val else "")
-    lines += [head, "|---" * (10 + (1 if egmd_val else 0)) + "|"]
-    sums = {"before": [], "after": []}
+    n_extra = 2 if egmd_val else 0
+    head = ("| 曲ID | 前（初期値のしきい値）M0-1 | 前 kick | 前 snare | 前 hihat | 前 M0-1 | 後 kick | 後 snare | 後 hihat | 後 M0-1 | 差 |"
+            + (" E-GMD 検証 前→後 | E-GMD 検証（初期値のしきい値）前→後 |" if egmd_val else ""))
+    lines += [head, "|---" * (11 + n_extra) + "|"]
+    sums = {"before0": [], "before": [], "after": []}
     for r in results:
         b, a = r["before"][key], r["after"][key]
+        b0 = r["before"].get("holdout_ckpt_thr") if key == "holdout" else None
         if b.get("m0_1") is not None and a.get("m0_1") is not None:
             sums["before"].append(b["m0_1"])
             sums["after"].append(a["m0_1"])
-        cells = [r["holdout"] or "（学習曲の当てはまり）"]
+            if b0 and b0.get("m0_1") is not None:
+                sums["before0"].append(b0["m0_1"])
+        cells = [r["holdout"] or "（学習曲の当てはまり）", f"{b0['m0_1']:.3f}" if b0 and b0.get("m0_1") is not None else "-"]
         cells += [f"{b[c]:.3f}" if b.get(c) is not None else "-" for c in M0_CLASSES] + [f"{b['m0_1']:.3f}" if b.get("m0_1") is not None else "-"]
         cells += [f"{a[c]:.3f}" if a.get(c) is not None else "-" for c in M0_CLASSES] + [f"{a['m0_1']:.3f}" if a.get("m0_1") is not None else "-"]
         cells.append(f"{a['m0_1'] - b['m0_1']:+.3f}" if b.get("m0_1") is not None and a.get("m0_1") is not None else "-")
         if egmd_val:
             cells.append(f"{r['before']['egmd']['m0_1']:.3f} → {r['after']['egmd']['m0_1']:.3f}")
+            cells.append(f"{r['before']['egmd_ckpt_thr']['m0_1']:.3f} → {r['after']['egmd_ckpt_thr']['m0_1']:.3f}")
         lines.append("| " + " | ".join(cells) + " |")
     if sums["before"]:
-        lines.append(f"| 平均 | | | | {np.mean(sums['before']):.3f} | | | | {np.mean(sums['after']):.3f} | {np.mean(sums['after']) - np.mean(sums['before']):+.3f} |" + (" |" if egmd_val else ""))
+        b0_avg = f"{np.mean(sums['before0']):.3f}" if sums["before0"] else ""
+        lines.append(f"| 平均 | {b0_avg} | | | | {np.mean(sums['before']):.3f} | | | | {np.mean(sums['after']):.3f} | {np.mean(sums['after']) - np.mean(sums['before']):+.3f} |"
+                     + (" | |" if egmd_val else ""))
     lines += ["",
-              "- 「前」は初期値のモデル、「後」は微調整したモデル。しきい値はどちらも学習した曲で種類ごとに選ぶ（評価曲は見ない）。",
+              "- 「前」は初期値のモデル、「後」は微調整したモデル。しきい値はどちらも学習した曲で種類ごとに選ぶ（評価曲は見ない）。「前（初期値のしきい値）」は初期値のモデルを初期値の json のしきい値で測ったもの（run_eval.py の表と同じ条件）。"
+              + (f" 微調整の後に初期値の重みを {args.mix_init:g} の割合で混ぜた（--mix-init）。" if args.mix_init > 0 else ""),
               "- 疑似正解（分離ツールのパート別ステムの打点検出）に対する F 値なので目安。" + ("評価曲はその曲を学習から外したモデル（leave-one-out）で測った。" if key == "holdout" else "holdout 無しなので当てはまりの数字で、汎化の目安にはならない。"),
               f"- 曲ごとのモデル: `{Path(args.out).stem}_<曲ID>.onnx`。`run_eval.py --model \"{Path(args.out).with_suffix('')}_{{id}}.onnx\"` で曲ごとに使う。" if key == "holdout" else f"- モデル: `{args.out}`。",
               "- CD 曲のステムで学習したモデルは評価用に限る（製品のモデルには権利の明確な音だけを使う。R3）。"]
@@ -669,6 +690,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--song-ids", default=None, help="微調整に使う曲 ID をコンマ区切りで絞る（省略で全曲）")
     ap.add_argument("--chunks-per-song", type=int, default=40, help="1 曲から 1 エポックに切り出す区間の数（微調整）")
     ap.add_argument("--max-seconds", type=float, default=60.0, help="古い hits_pseudo.csv（コメント行なし）の区間の長さ（run_eval.py の既定と同じ）")
+    ap.add_argument("--mix-init", type=float, default=0.0,
+                    help="微調整の後に初期値の重みを混ぜる割合（0〜1。0.5 で半々）。学習した曲に寄り過ぎるのを抑える（robust fine-tuning）。既定 0")
     args = ap.parse_args(argv)
     if args.finetune_stems:
         if not args.init_from:

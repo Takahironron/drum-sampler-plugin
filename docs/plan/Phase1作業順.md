@@ -28,7 +28,7 @@
 
 | 段階 | 内容 | 判定 |
 |---|---|---|
-| 1 | 製品の経路を Python で通す（採譜 → パート分け → 切り出し → キット → 再現）。区分 A・B で測る | SpectraLayers 無しで M0-2 相当（半数以上で「同じキット」）に届くか |
+| 1 | 製品の経路を Python で通す（採譜 → パート分け → 切り出し → キット → 再現）。区分 A・B で測る。**2026-11-13: 微調整モデル ＋ NMFD で再現の距離 2.22（SpectraLayers の経路 1.29）。聞き比べ待ち** | SpectraLayers 無しで M0-2 相当（半数以上で「同じキット」）に届くか |
 | 2 | 解析の C++／ONNX への移植（対数メル、CRNN の推論、NMFD、切り出し、代表音の選択）。裏のスレッド、進み具合の表示、途中で止められる | 3 分の曲を 1 分以内で解析 |
 | 3 | エンジン（`SampleVoice`、チョーク、パートごとの EQ・コンプ、バス、個別出力）と `KitModel` の保存 | pluginval、主要 DAW で動く |
 | 4 | UI の最小版（① 解析 ② キット の 2 画面、A/B ボタン、採譜の修正、MIDI の書き出し） | M1: ステムを落として 1 分以内にキットが鳴り、MIDI で DAW に渡せる |
@@ -39,7 +39,7 @@
 2. パート分けの自前化（最重要。NMFD か StemGMD の学習モデル）。
 3. 打点で説明できない音（タンバリン、残響）の扱い。「その他のパーカッション」か「残差の層」。
 4. エフェクトの当てはめの乾いた音の基準（内蔵ライブラリ、モーダル音）とチェーンの範囲（コンプ・歪み・ゲート）。
-5. 代表音の選び方の天井（特徴の設計か、聞こえ方に沿った距離の指標）。
+5. 代表音の選び方の天井（特徴の設計か、聞こえ方に沿った距離の指標）。製品の経路ではシンバルが損失の最大（過検出と、長い余韻の代表音。2026-11-13）。
 
 ## 5. 進み具合
 
@@ -48,7 +48,7 @@
 | Phase 1 の作業順（この文書） | 済 | 2026-11-03 |
 | 区分 B の評価用ステム | 未 | Takahiro の DAW で |
 | NMFD の試作 | 済（合成音と実ステム） | `analysis/drumeval/nmfd.py`、`separate_parts.py`、`run_eval.py --parts nmfd`。合成音: スネア 19 dB、ハイハット 50 dB、キック 9 dB、シンバル 0 dB 前後。実ステム（`docs/phase0/結果/2026-11-12_NMFD実ステム.md`）: キック +11.5 dB、スネア +2.1、ハイハット −0.2、シンバル −2.2。聞き比べは「良好」。再現の距離は自己再現 3.21・方式 C 3.72（SpectraLayers の経路は 0.20・1.29）で、差は採譜の取りこぼし。切り分け用に `--parts nmfd-oracle`（疑似正解の打点で NMFD の上限）と `--nmfd-no-residual` を追加（実ステムは未） |
-| 採譜の実ステムへの適応（疑似ラベルの微調整、leave-one-out） | 済（実装。実ステムは未） | `train_transcriber.py --finetune-stems data\stems --init-from crnn_egmd_v5.pt --holdout all`（`drumeval/stems.py`）。曲ごとの前後の表 `crnn_ft_v5_loo.md`、`run_eval.py --model "…_{id}.onnx"` で製品の経路を測る。`docs/phase0/E-GMD学習の手順.md` 5 節。CD 曲のステムで学習したモデルは評価用に限る（R3） |
+| 採譜の実ステムへの適応（疑似ラベルの微調整、leave-one-out） | 済（実ステムで効果あり。`docs/phase0/結果/2026-11-13_微調整_と_製品の経路.md`: 採譜 0.555 → 0.727、製品の経路の再現 3.72 → 2.22。a06（電子系）だけ悪化 → `--mix-init` で対策中） | `train_transcriber.py --finetune-stems data\stems --init-from crnn_egmd_v5.pt --holdout all`（`drumeval/stems.py`）。曲ごとの前後の表 `crnn_ft_v5_loo.md`、`run_eval.py --model "…_{id}.onnx"` で製品の経路を測る。`docs/phase0/E-GMD学習の手順.md` 5 節。CD 曲のステムで学習したモデルは評価用に限る（R3） |
 | 採譜 v6（E-GMD 全データ） | 未 | |
 | JUCE の KitModel と SampleVoice | 済 | `plugin/Source/KitModel.*`、`SampleEngine.*`。Python の `kit.json` を読み、層・ラウンドロビン・音量合わせ・チョークで鳴らす。`KitRenderTest` で DAW 無しの通し、Linux の pluginval（画面のテスト除く）SUCCESS。CI で Python → C++ の受け渡しを毎回通す |
 | ONNX Runtime の試作 | 未 | |
