@@ -116,3 +116,43 @@ def multi_resolution_stft_distance(
         "spectral_convergence": sc_mean,
         "log_magnitude": lm_mean,
     }
+
+
+# ---------------------------------------------------------------------------
+# 帯域ごとのエネルギー差（「こもる」「痩せる」を数字にする）
+# ---------------------------------------------------------------------------
+
+# (名前, 下限 Hz, 上限 Hz)。上限 None はナイキスト周波数まで
+BANDS: tuple[tuple[str, float, float | None], ...] = (
+    ("低", 0.0, 200.0), ("中低", 200.0, 1000.0), ("中", 1000.0, 4000.0), ("高", 4000.0, 10000.0), ("超高", 10000.0, None),
+)
+
+
+def band_powers(x: np.ndarray, sr: int, bands: Sequence[tuple[str, float, float | None]] = BANDS, n_fft: int = 4096) -> dict[str, float]:
+    """帯域ごとの平均パワー（全区間の平均スペクトルを帯域で足す）。"""
+    from scipy.signal import welch
+
+    x = np.asarray(x, dtype=np.float64).ravel()
+    f, pxx = welch(x, fs=sr, nperseg=min(n_fft, max(x.size, 16)))
+    out = {}
+    for name, lo, hi in bands:
+        sel = (f >= lo) & (f < (hi if hi is not None else sr))
+        out[name] = float(np.sum(pxx[sel])) if np.any(sel) else 0.0
+    return out
+
+
+def band_balance_db(ref: np.ndarray, est: np.ndarray, sr: int, match_rms: bool = True,
+                    bands: Sequence[tuple[str, float, float | None]] = BANDS) -> dict[str, float]:
+    """`est` の帯域ごとのレベルから `ref` のレベルを引いた差（dB）。負なら `est` のその帯域が足りない。
+
+    `match_rms` なら全体の音量（RMS）を先に合わせる（聞き比べは音量をそろえて行うので、差は音色の傾きを表す。高域が負なら「こもる」）。
+    False なら絶対的な差（分離で失ったエネルギーなど）。
+    """
+    ref = np.asarray(ref, dtype=np.float64).ravel()
+    est = np.asarray(est, dtype=np.float64).ravel()
+    n = min(ref.size, est.size)
+    ref, est = ref[:n], est[:n]
+    if match_rms:
+        est = est * (np.sqrt(np.mean(ref**2)) + 1e-12) / (np.sqrt(np.mean(est**2)) + 1e-12)
+    pr, pe = band_powers(ref, sr, bands), band_powers(est, sr, bands)
+    return {name: float(10.0 * np.log10((pe[name] + 1e-20) / (pr[name] + 1e-20))) for name, _, _ in bands}

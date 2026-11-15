@@ -21,6 +21,14 @@ from scipy.signal import istft, stft
 from .labels import Hit, to_coarse
 
 PARTS: tuple[str, ...] = ("kick", "snare", "hihat", "cymbal")
+ALL_PARTS: tuple[str, ...] = ("kick", "snare", "hihat", "tom", "cymbal")
+
+
+def parts_for_hits(hits: list[Hit], min_tom_hits: int = 4) -> tuple[str, ...]:
+    """打点に合わせたパートの並び。タムの打が `min_tom_hits` 以上あればタムのパートも作る
+    （無いとタムの音は残差か他のパートに入る。少数の誤検出だけでタムのパートを作らないための下限）。"""
+    n_tom = sum(1 for h in hits if to_coarse(h.cls) == "tom")
+    return ALL_PARTS if n_tom >= min_tom_hits else PARTS
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,20 @@ class NMFDConfig:
     residual: bool = True  # 打点に縛られない残差の成分を 1 つ足す（にじみ・残響を吸う）
     power: float = 1.0  # V = |X|^power（1 で振幅）
     mask_exponent: float = 2.0  # Wiener マスクの指数
+    # 活性の縛り方:
+    #   "ramp"    従来。打点からの距離で 1 → off_onset に下がる係数を、更新のたびに活性に掛ける（係数が累積する）
+    #   "support" 窓（打点の前後）の中は自由、外は off_onset
+    #   "decay"   窓の中は自由。ただし立ち上がり（attack_frames）の後は増えない（打った後の音は減るだけ）
+    constraint: str = "ramp"
+    # 窓の長さ: "fixed" は post_onset_sec、"to_next" は同じ種類の次の打まで（上限 max_window_sec）
+    window: str = "fixed"
+    max_window_sec: tuple[tuple[str, float], ...] = (("kick", 1.0), ("snare", 1.5), ("hihat", 1.0), ("tom", 1.5), ("cymbal", 4.0))
+    attack_frames: int = 3
+    residual_smooth_sec: float = 0.0  # 残差の活性を時間方向にならす幅（秒。0 でならさない）。ならすと残差は打の立ち上がりを追えない
+    residual_penalty: float = 0.0  # 残差の活性への罰（疎にする項。更新の分母に掛ける 1 + この値）。大きいほど、ドラムで説明できる音を残差に渡さない
+    # ひな形の初期値から、いつも同時に鳴る他の種類の音を引く（例: スネアの打がいつもハイハットと同時なら、スネアのひな形から
+    # ハイハット単独のひな形を引く）。引かないと、同時に鳴る種類の音を丸ごと抱えたひな形になり、その種類の音を奪う
+    deflate_templates: bool = False
 
 
 def _stft(x: np.ndarray, cfg: NMFDConfig):
@@ -51,18 +73,19 @@ def _istft(z: np.ndarray, cfg: NMFDConfig, n: int) -> np.ndarray:
     return y[:n]
 
 
+def _shifted(H: np.ndarray, L: int) -> np.ndarray:
+    """Hs[k, τ, t] = H[k, t − τ]（t < τ は 0）。形は [K, L, T]。"""
+    K, T = H.shape
+    Hs = np.zeros((K, L, T))
+    for tau in range(L):
+        Hs[:, tau, tau:] = H[:, : T - tau]
+    return Hs
+
+
 def _approx(W: np.ndarray, H: np.ndarray) -> np.ndarray:
-    """Λ[f, t] = Σ_k Σ_τ W[k, f, τ] H[k, t − τ]"""
+    """Λ[f, t] = Σ_k Σ_τ W[k, f, τ] H[k, t − τ]。[F, K·L] と [K·L, T] の行列積 1 回で計算する。"""
     K, F, L = W.shape
-    T = H.shape[1]
-    lam = np.zeros((F, T))
-    for k in range(K):
-        for tau in range(L):
-            if tau == 0:
-                lam += np.outer(W[k, :, 0], H[k])
-            else:
-                lam[:, tau:] += np.outer(W[k, :, tau], H[k, : T - tau])
-    return lam
+    return W.transpose(1, 0, 2).reshape(F, K * L) @ _shifted(H, L).reshape(K * L, H.shape[1])
 
 
 def spectral_prior(cls: str, freqs: np.ndarray) -> np.ndarray:
@@ -83,9 +106,33 @@ def spectral_prior(cls: str, freqs: np.ndarray) -> np.ndarray:
     return np.clip(w, 0.05, 1.0)
 
 
+def onset_windows(hits: list[Hit], frame_rate: float, T: int, cfg: NMFDConfig, parts: tuple[str, ...] = PARTS) -> list[list[tuple[int, int, int]]]:
+    """種類ごとに、各打の窓 (始まり, 打点, 終わり) をフレームで返す。活性はこの窓の中だけ許す。
+
+    `cfg.window == "fixed"`: 打点の後 `post_onset_sec`。`"to_next"`: 同じ種類の次の打の手前まで（上限 `max_window_sec`）。
+    """
+    post = dict(cfg.post_onset_sec)
+    longest = dict(cfg.max_window_sec)
+    out: list[list[tuple[int, int, int]]] = []
+    for cls in parts:
+        frames = sorted({int(round(h.time * frame_rate)) for h in hits if to_coarse(h.cls) == cls and 0 <= h.time * frame_rate < T})
+        wins = []
+        for i, fr in enumerate(frames):
+            lo = max(fr - cfg.onset_halfwidth, 0)
+            if cfg.window == "to_next":
+                hi = min(fr + max(int(longest.get(cls, 1.0) * frame_rate), cfg.onset_halfwidth) + 1, T)
+                if i + 1 < len(frames):
+                    hi = min(hi, max(frames[i + 1] - cfg.onset_halfwidth, fr + 1))
+            else:
+                hi = min(fr + max(int(post.get(cls, 0.2) * frame_rate), cfg.onset_halfwidth) + 1, T)
+            wins.append((lo, fr, hi))
+        out.append(wins)
+    return out
+
+
 def initialize(V: np.ndarray, hits: list[Hit], frame_rate: float, cfg: NMFDConfig, parts: tuple[str, ...] = PARTS,
                freqs: np.ndarray | None = None):
-    """活性 H を打点から、ひな形 W を打点直後のパッチの中央値から初期化する。
+    """活性 H を打点から、ひな形 W を打点直後のパッチの中央値から初期化する。返り値: (W, H, 窓)。
 
     ひな形は、他の種類と同時（±30 ms）でない打があればそれだけから作り（キックと同時のクラッシュなどの混入を避ける）、
     種類ごとの帯域の重みを掛ける。
@@ -96,24 +143,46 @@ def initialize(V: np.ndarray, hits: list[Hit], frame_rate: float, cfg: NMFDConfi
     H = np.full((K, T), cfg.off_onset)
     W = np.full((K, F, L), 1e-3)
     rng = np.random.default_rng(0)
-    post = dict(cfg.post_onset_sec)
+    windows = onset_windows(hits, frame_rate, T, cfg, parts)
     all_times = sorted((h.time, to_coarse(h.cls)) for h in hits)
+    alone: dict[str, np.ndarray | None] = {}  # 種類 → 単独の打から作ったひな形（単独の打が 3 つ未満なら None）
+    together: dict[tuple[str, str], float] = {}  # (種類, 他の種類) → 同時に鳴る打の割合
     for k, cls in enumerate(parts):
         own = sorted({h.time for h in hits if to_coarse(h.cls) == cls and 0 <= h.time * frame_rate < T})
-        frames = [int(round(t * frame_rate)) for t in own]
-        n_post = max(int(post.get(cls, 0.2) * frame_rate), cfg.onset_halfwidth)
-        for fr in frames:
-            lo, hi = max(fr - cfg.onset_halfwidth, 0), min(fr + n_post + 1, T)
-            # 打点で 1、その後は直線に下げて off_onset へ（余韻を許しつつ、次の打までに消える形）
-            ramp = np.linspace(1.0, cfg.off_onset, hi - lo)
-            H[k, lo:hi] = np.maximum(H[k, lo:hi], ramp)
+        for lo, fr, hi in windows[k]:
+            if cfg.constraint == "ramp":
+                # 打点で 1、その後は直線に下げて off_onset へ（余韻を許しつつ、次の打までに消える形）
+                shape = np.linspace(1.0, cfg.off_onset, hi - lo)
+            else:
+                # 窓の頭から立ち上がりまで 1、その後は指数で下げる（形は初期値。後は更新が決める）
+                n = hi - lo
+                t = np.maximum(np.arange(n) - (fr - lo) - cfg.attack_frames, 0)
+                shape = np.exp(-3.0 * t / max(n, 1))
+            H[k, lo:hi] = np.maximum(H[k, lo:hi], shape)
         isolated = [t for t in own if not any(c != cls and abs(t2 - t) <= 0.03 for t2, c in all_times)]
         use = isolated if len(isolated) >= 3 else own
         patches = [V[:, fr : fr + L] for fr in (int(round(t * frame_rate)) for t in use) if fr + L <= T]
         if patches:
             W[k] = np.median(np.stack(patches), axis=0) + 1e-6
+            alone[cls] = W[k].copy() if len(isolated) >= 3 else None
+            if alone[cls] is None:  # 単独の打が足りない: どの種類とどれだけ同時に鳴るかを覚えておく
+                for other in parts:
+                    if other != cls:
+                        n_co = sum(1 for t in own if any(c == other and abs(t2 - t) <= 0.03 for t2, c in all_times))
+                        together[(cls, other)] = n_co / max(len(own), 1)
         else:  # その種類の打が無ければ、平均的な形で薄く初期化
             W[k] = V.mean(axis=1, keepdims=True) * np.linspace(1.0, 0.2, L)[None, :] * 0.1 + 1e-6
+    if cfg.deflate_templates:
+        # 単独の打が足りない種類のひな形（中央値）は、半分以上の打で同時に鳴る種類の音を含む。その種類の単独のひな形を引く
+        for k, cls in enumerate(parts):
+            if alone.get(cls, 0) is not None:
+                continue
+            base = W[k].copy()
+            for other in parts:
+                if together.get((cls, other), 0.0) >= 0.5 and alone.get(other) is not None:
+                    W[k] = W[k] - alone[other]
+            W[k] = np.maximum(W[k], 0.05 * base)
+    for k, cls in enumerate(parts):
         if freqs is not None:
             W[k] *= spectral_prior(cls, freqs)[:, None]
     if cfg.residual:
@@ -122,39 +191,103 @@ def initialize(V: np.ndarray, hits: list[Hit], frame_rate: float, cfg: NMFDConfi
     # ひな形の大きさをそろえる（各ひな形の和を 1 に）
     W /= W.sum(axis=(1, 2), keepdims=True) + 1e-12
     H *= V.sum() / (K * max(T, 1))
-    return W, H
+    return W, H, windows
 
 
-def update(V: np.ndarray, W: np.ndarray, H: np.ndarray, cfg: NMFDConfig, H_mask: np.ndarray | None = None):
-    """KL ダイバージェンスの乗法更新を 1 回。`H_mask` があれば活性をそれで抑える（打点の近くだけ許すなど）。"""
+def update(V: np.ndarray, W: np.ndarray, H: np.ndarray, cfg: NMFDConfig, H_mask: np.ndarray | None = None,
+           windows: list[list[tuple[int, int, int]]] | None = None, n_drums: int | None = None, smooth_frames: int = 0):
+    """KL ダイバージェンスの乗法更新を 1 回。
+
+    `H_mask` があれば活性に掛ける（"ramp" では距離で下がる係数、"support"／"decay" では窓の中 1・外 off_onset）。
+    `windows`（種類ごとの (始まり, 打点, 終わり) のフレーム）があり `cfg.constraint == "decay"` なら、各窓で立ち上がりの後の活性を
+    「増えない」ように直す。`n_drums` はドラムの成分の数（残りは残差）。`smooth_frames` は残差の活性をならす幅（フレーム）。
+    """
     K, F, L = W.shape
     T = H.shape[1]
     eps = 1e-10
-    lam = _approx(W, H) + eps
+    W2 = W.transpose(1, 0, 2).reshape(F, K * L)  # [F, K·L]
+    lam = W2 @ _shifted(H, L).reshape(K * L, T) + eps
     R = V / lam
-    # H の更新
+    # H の更新: numH[k, t] = Σ_τ Σ_f W[k, f, τ] R[f, t + τ]
+    G = (W2.T @ R).reshape(K, L, T)
+    colsum = W.sum(axis=1)  # [K, L]
     numH = np.zeros_like(H)
     denH = np.zeros_like(H)
-    for k in range(K):
-        for tau in range(L):
-            w = W[k, :, tau]
-            numH[k, : T - tau] += w @ R[:, tau:]
-            denH[k, : T - tau] += w.sum()
+    for tau in range(L):
+        numH[:, : T - tau] += G[:, tau, tau:]
+        denH[:, : T - tau] += colsum[:, tau : tau + 1]
+    if cfg.residual and cfg.residual_penalty > 0 and n_drums is not None:
+        denH[n_drums:] *= 1.0 + cfg.residual_penalty
     H = H * (numH / (denH + eps))
     if H_mask is not None:
         H = H * H_mask
-    lam = _approx(W, H) + eps
+    if cfg.constraint == "decay" and windows is not None:
+        for k, wins in enumerate(windows):
+            for lo, fr, hi in wins:
+                a = min(fr + cfg.attack_frames, hi)
+                if hi - a > 0 and a >= 1:
+                    H[k, a - 1 : hi] = np.minimum.accumulate(H[k, a - 1 : hi])
+    if cfg.residual and smooth_frames > 1 and n_drums is not None:
+        from scipy.ndimage import uniform_filter1d
+
+        H[n_drums:] = uniform_filter1d(H[n_drums:], size=smooth_frames, axis=1, mode="nearest")
+    Hs = _shifted(H, L).reshape(K * L, T)
+    lam = W2 @ Hs + eps
     R = V / lam
-    # W の更新
-    for k in range(K):
-        for tau in range(L):
-            h = H[k, : T - tau]
-            numW = R[:, tau:] @ h
-            denW = h.sum() + eps
-            W[k, :, tau] = W[k, :, tau] * (numW / denW)
+    # W の更新: numW[k, f, τ] = Σ_t R[f, t + τ] H[k, t]
+    numW = (R @ Hs.T).reshape(F, K, L).transpose(1, 0, 2)  # [K, F, L]
+    denW = Hs.sum(axis=1).reshape(K, 1, L) + eps
+    W = W * (numW / denW)
     W = np.maximum(W, 1e-12)
     W /= W.sum(axis=(1, 2), keepdims=True) + 1e-12  # 大きさは H に持たせる
     return W, H
+
+
+def compute_masks(x: np.ndarray, sr: int, hits: list[Hit], cfg: NMFDConfig | None = None, parts: tuple[str, ...] = PARTS,
+                  constrain_onsets: bool = True) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """因子分解して、パートごとの時間周波数マスクを返す: (複素 STFT X [F, T], マスク [K, F, T]（和は 1）, 名前)。
+
+    マスクは同じ設定の STFT に掛ければ別の信号にも使える（評価で、ドラムとにじみがそれぞれどのパートへ行くかを測る）。
+    """
+    cfg = cfg or NMFDConfig()
+    x = np.asarray(x, dtype=np.float64).ravel()
+    freqs, _, X = _stft(x, cfg)
+    freqs = freqs * sr  # scipy は fs=1 のとき正規化周波数を返す
+    V = np.abs(X) ** cfg.power + 1e-8
+    frame_rate = sr / cfg.hop
+    W, H, windows = initialize(V, hits, frame_rate, cfg, parts, freqs)
+    n_drums = len(parts)
+    H_mask = None
+    if constrain_onsets:
+        H_mask = np.ones_like(H)
+        if cfg.constraint == "ramp":
+            # 初期の活性（打点からの距離で 1 → off_onset）をそのままマスクにする（毎回掛かるので累積する）
+            scale = H[:n_drums].max(axis=1, keepdims=True) + 1e-12
+            H_mask[:n_drums] = np.clip(H[:n_drums] / scale, cfg.off_onset, 1.0)
+        else:
+            # 窓の中は 1（自由）、外は off_onset
+            H_mask[:n_drums] = cfg.off_onset
+            for k, wins in enumerate(windows):
+                for lo, _, hi in wins:
+                    H_mask[k, lo:hi] = 1.0
+    smooth_frames = int(round(cfg.residual_smooth_sec * frame_rate))
+    for _ in range(cfg.iterations):
+        W, H = update(V, W, H, cfg, H_mask, windows if constrain_onsets else None, n_drums, smooth_frames)
+    # Wiener マスクで複素 STFT を分ける
+    comps = np.stack([_approx(W[k : k + 1], H[k : k + 1]) ** cfg.mask_exponent for k in range(W.shape[0])])
+    total = comps.sum(axis=0)
+    tiny = total < 1e-20
+    masks = comps / np.where(tiny, 1.0, total)[None]
+    masks[:, tiny] = 1.0 / comps.shape[0]  # どの成分も無いところは等分（マスクの和を常に 1 にし、パートの和を元に等しくする）
+    names = list(parts) + (["residual"] if cfg.residual else [])
+    return X, masks, names
+
+
+def apply_masks(x: np.ndarray, masks: np.ndarray, names: list[str], cfg: NMFDConfig) -> dict[str, np.ndarray]:
+    """`compute_masks` のマスクを信号 `x`（同じ長さ）に掛けて、名前 → 波形 を返す。"""
+    x = np.asarray(x, dtype=np.float64).ravel()
+    _, _, X = _stft(x, cfg)
+    return {name: _istft(X * m, cfg, x.size) for name, m in zip(names, masks)}
 
 
 def separate(x: np.ndarray, sr: int, hits: list[Hit], cfg: NMFDConfig | None = None, parts: tuple[str, ...] = PARTS,
@@ -165,30 +298,8 @@ def separate(x: np.ndarray, sr: int, hits: list[Hit], cfg: NMFDConfig | None = N
     """
     cfg = cfg or NMFDConfig()
     x = np.asarray(x, dtype=np.float64).ravel()
-    freqs, _, X = _stft(x, cfg)
-    freqs = freqs * sr  # scipy は fs=1 のとき正規化周波数を返す
-    V = np.abs(X) ** cfg.power + 1e-8
-    frame_rate = sr / cfg.hop
-    W, H = initialize(V, hits, frame_rate, cfg, parts, freqs)
-    H_mask = None
-    if constrain_onsets:
-        # 初期の活性（打点からの距離で 1 → off_onset）をそのままマスクにする
-        H_mask = np.ones_like(H)
-        scale = H[: len(parts)].max(axis=1, keepdims=True) + 1e-12
-        H_mask[: len(parts)] = np.clip(H[: len(parts)] / scale, cfg.off_onset, 1.0)
-    for _ in range(cfg.iterations):
-        W, H = update(V, W, H, cfg, H_mask)
-    # Wiener マスクで複素 STFT を分ける
-    comps = np.stack([_approx(W[k : k + 1], H[k : k + 1]) ** cfg.mask_exponent for k in range(W.shape[0])])
-    total = comps.sum(axis=0)
-    tiny = total < 1e-20
-    masks = comps / np.where(tiny, 1.0, total)[None]
-    masks[:, tiny] = 1.0 / comps.shape[0]  # どの成分も無いところは等分（マスクの和を常に 1 にし、パートの和を元に等しくする）
-    out: dict[str, np.ndarray] = {}
-    names = list(parts) + (["residual"] if cfg.residual else [])
-    for name, m in zip(names, masks):
-        out[name] = _istft(X * m, cfg, x.size)
-    return out
+    X, masks, names = compute_masks(x, sr, hits, cfg, parts, constrain_onsets)
+    return {name: _istft(X * m, cfg, x.size) for name, m in zip(names, masks)}
 
 
 def snr_db(ref: np.ndarray, est: np.ndarray) -> float:
