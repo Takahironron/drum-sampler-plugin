@@ -137,3 +137,28 @@ def test_onset_lag_handles_short_samples():
     pulse[1000:1100] = np.hanning(100)
     shifted = np.roll(pulse, 200)  # 200 サンプル遅れ
     assert _onset_lag(pulse, shifted, sr) == -200
+
+
+def test_segment_limit_is_longer_for_cymbals():
+    """区間の上限は種類ごと。シンバルは 4 秒まで取り、余韻を切らない（全種類 1.5 秒だと高域が減る）。"""
+    from drumeval.extract import cut_segments_from_parts, hit_segments_from_parts, max_len_for, self_render_from_parts
+
+    sr = 8000
+    n = sr * 10
+    rng = np.random.default_rng(0)
+    cym = np.zeros(n)
+    cym[sr : sr * 6] = rng.standard_normal(sr * 5) * np.exp(-np.arange(sr * 5) / (1.5 * sr))  # 1 秒目に打って 5 秒鳴る
+    kick = np.zeros(n)
+    kick[sr * 2 : sr * 5] = rng.standard_normal(sr * 3) * 0.1
+    parts = {"cymbal": (cym, sr), "kick": (kick, sr)}
+    hits = [Hit(1.0, "crash", 100), Hit(2.0, "kick", 100)]
+    assert max_len_for("cymbal") == 4.0 and max_len_for("kick") == 1.5 and max_len_for("cymbal", 1.5) == 1.5
+    own = hit_segments_from_parts(parts, hits)
+    assert abs(own[0].size / sr - 4.0) < 0.01 and abs(own[1].size / sr - 1.5) < 0.01
+    segs = {s.cls: s for s in cut_segments_from_parts(parts, hits)}
+    assert segs["cymbal"].audio.size / sr > 3.9 and segs["kick"].audio.size / sr < 1.6
+    y = self_render_from_parts(parts, hits, 10.0)
+    assert np.sum(y[int(3.0 * sr) : int(4.9 * sr)] ** 2) > 0.5 * np.sum(cym[int(3.0 * sr) : int(4.9 * sr)] ** 2)  # 2〜4 秒後の余韻も鳴る
+    short = self_render_from_parts(parts, hits, 10.0, max_len_sec=1.5)
+    assert np.sum(short[int(3.0 * sr) : int(4.9 * sr)] ** 2) < 0.2 * np.sum(cym[int(3.0 * sr) : int(4.9 * sr)] ** 2)
+

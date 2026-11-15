@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ドラムのステムを NMFD でパート（キック／スネア／ハイハット／シンバル）に分ける（計画書 3.3 の (2)）。
+"""ドラムのステムを NMFD でパート（キック／スネア／ハイハット／シンバル。タムの打が 4 つ以上あればタムも）に分ける（計画書 3.3 の (2)）。
 
 使い方::
 
@@ -20,7 +20,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from drumeval import load_hits  # noqa: E402
-from drumeval.nmfd import NMFDConfig, separate, snr_db  # noqa: E402
+from drumeval.nmfd import config_for, parts_for_hits, separate, snr_db  # noqa: E402
 from run_eval import find_part_stems  # noqa: E402
 from stft_distance import load_mono  # noqa: E402
 
@@ -39,11 +39,11 @@ def main(argv: list[str] | None = None) -> int:
 
     x, sr = load_mono(args.wav, None)
     hits = load_hits(args.hits)
-    cfg = NMFDConfig(n_fft=2048 if sr >= 40000 else 1024, hop=512 if sr >= 40000 else 256, residual=not args.no_residual, iterations=args.iterations)
-    sep = separate(x, sr, hits, cfg)
+    cfg = config_for(sr, residual=not args.no_residual, iterations=args.iterations)
+    sep = separate(x, sr, hits, cfg, parts=parts_for_hits(hits))
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    names = {"kick": "キック", "snare": "スネア", "hihat": "ハイハット", "cymbal": "シンバル", "residual": "残差"}
+    names = {"kick": "キック", "snare": "スネア", "hihat": "ハイハット", "tom": "タム", "cymbal": "シンバル", "residual": "残差"}
     for c, y in sep.items():
         sf.write(out / f"{names.get(c, c)}.wav", y.astype(np.float32), sr)
     print(f"書き出した: {out}（{', '.join(sep)}）")

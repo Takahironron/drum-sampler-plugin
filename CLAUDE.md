@@ -47,6 +47,7 @@
 
 - 解析は Python（PyTorch、librosa など）で試作し、精度を確かめてから C++／ONNX に移す。音源側は最初から JUCE で書く。
 - pluginval で VST3 を自動検査、GitHub Actions で Windows と macOS のビルド、解析の精度は固定の評価用ステム集で毎回測る（回帰テスト）。
+- Takahiro の評価用ステム（区分 A、CD 曲）はクラウドに無い。パート分け・切り出し・再現を変えるときは、先にクラウドで E-GMD と StemGMD の標本（下の表）で前後を測り、それから Takahiro に区分 A での実行と聞き比べを頼む。
 
 ### 機能の網羅（計画書4章）
 
@@ -112,6 +113,7 @@
 | E-GMD で採譜モデルを学習する手順 | `docs/phase0/E-GMD学習の手順.md` |
 | 評価の結果の記録 | `docs/phase0/結果/`（手元の出力は `data/results/`、コミットしない） |
 | 採点スクリプト（F 値、STFT 距離） | `analysis/`（`analysis/README.md`） |
+| クラウドでも使える実データの評価セット（CC BY 4.0。`data/` に取ってくる。コミットしない） | `analysis/fetch_egmd_sample.py`（E-GMD の 14 本。正解 MIDI、タム・シンバル・電子系のキット）、`analysis/fetch_stemgmd_sample.py`（StemGMD の 12 曲。パート別の単独録音 = 分離の本当の正解）。取った後 `python analysis/run_eval.py data/stemgmd_stems --parts nmfd-oracle` |
 | JUCE の空のプラグイン | `plugin/`（`plugin/README.md`） |
 | 市販ドラム音源の機能比較（25製品×32機能、出典48件、ジャンル別キット） | `docs/research/ドラム音源_機能比較.xlsx` |
 | 物理モデリング系プラグイン46件＋D3 先行事例の比較 | `docs/research/ドラム音源プラグイン比較.xlsx`（生成スクリプトは無い。元データは D1_products.md の表A〜C） |

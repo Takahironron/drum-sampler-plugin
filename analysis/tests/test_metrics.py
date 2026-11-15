@@ -109,3 +109,22 @@ def test_stft_distance_detects_eq_change():
     d_filtered = multi_resolution_stft_distance(x, y)
     d_same = multi_resolution_stft_distance(x, x)
     assert d_filtered["total"] > d_same["total"] + 0.1
+
+
+def test_band_balance_shows_missing_highs():
+    """高域を落とした音は、音量をそろえた後の高域の差が負になる（「こもる」を数字にする）。"""
+    from scipy.signal import butter, lfilter
+
+    from drumeval.metrics import band_balance_db
+
+    sr = 44100
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal(sr * 2)
+    b, a = butter(2, 3000.0 / (sr / 2))
+    dull = lfilter(b, a, x)
+    d = band_balance_db(x, dull, sr)
+    assert d["高"] < -3.0 and d["超高"] < -15.0 and d["低"] > 3.0  # 音量をそろえると低域は相対的に上がる
+    same = band_balance_db(x, 0.5 * x, sr)
+    assert all(abs(v) < 0.1 for v in same.values())  # 音量だけの違いは差にならない
+    absolute = band_balance_db(x, 0.5 * x, sr, match_rms=False)
+    assert all(abs(v + 6.02) < 0.1 for v in absolute.values())

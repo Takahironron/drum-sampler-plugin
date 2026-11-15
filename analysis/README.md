@@ -24,12 +24,14 @@ pip install -r analysis/requirements-ml.txt
 | `extract_kit.py` | 重ならない打の切り出し → 強さ別の層 → キット（M0-2 の材料） | `python analysis/extract_kit.py ステム.wav 打点.csv 出力先 --render 再現.wav` |
 | `fit_fx.py` | 固定の形のエフェクトチェーンの当てはめ（M0-3） | `python analysis/fit_fx.py 乾いた音.wav 目標.wav --out params.json --render 当てはめ後.wav` |
 | `pack_stems.py` | 分離したステムを受け渡し用に小さくする（モノラル 44.1 kHz FLAC、先頭 90 秒） | `python analysis/pack_stems.py 分離したWAVのフォルダ data/stems --seconds 90` |
-| `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト）。パート別ステム（キック.wav など）があれば疑似正解で F 値の目安を出し、パート別の切り出しも試す。`--model` で ONNX の採譜モデル、`--render` で聞き比べ用 WAV、`--parts nmfd` で自前のパート分け（製品の経路）、`--parts nmfd-oracle` で疑似正解の打点から NMFD（分離の上限）、`--nmfd-no-residual` で残差の成分なし。`--model` の `{id}` は曲 ID に置き換わる（曲ごとの微調整モデル） |
+| `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト）。パート別ステム（キック.wav など）があれば疑似正解で F 値の目安を出し、パート別の切り出しも試す。`--model` で ONNX の採譜モデル、`--render` で聞き比べ用 WAV、`--parts nmfd` で自前のパート分け（製品の経路）、`--parts nmfd-oracle` で疑似正解の打点から NMFD（分離の上限）、`--nmfd-no-residual` で残差の成分なし、`--nmfd-legacy` で 2026-11-15 より前の NMFD（比較用）。`--model` の `{id}` は曲 ID に置き換わる（曲ごとの微調整モデル）。表には帯域ごとの差（パートの和・自己再現・方式 C と元の差、dB）も出る |
 | `separate_parts.py` | NMFD でドラムのステムをキック／スネア／ハイハット／シンバルに分ける（計画書 3.3 の (2)） | `python analysis/separate_parts.py ドラム.wav 打点.csv 出力先 --reference-dir パート別ステムのフォルダ` | `python analysis/run_eval.py data/stems --out data/results/2026-11-01.md` |
 | `list_itunes_library.py` | iTunes の書き出し（XML かテキスト）をジャンル別の一覧にする（区分 A の選曲用） | `python analysis/list_itunes_library.py ライブラリ.xml --out docs/phase0/itunes一覧.md` |
 | `make_eval_midi.py` | 区分 B の評価用 MIDI 曲（正解の打点・区間ラベル付き）を生成 | `python analysis/make_eval_midi.py --out analysis/eval_midi` |
 | `remap_midi_notes.py` | ドラムのノート番号をキットのパッド配置に付け替える（GM → Maschine／XO など） | `python analysis/remap_midi_notes.py song.mid out.mid --preset maschine16` |
 | `render_midi_synth.py` | song.mid を合成音で WAV にする（DAW で書き出す前の確認用） | `python analysis/render_midi_synth.py analysis/eval_midi/b01_rock/song.mid data/preview/b01_rock.wav` |
+| `fetch_egmd_sample.py` | E-GMD（CC BY 4.0）から少数のトラックだけを取る（zip 全体 90 GB を落とさず、HTTP の範囲指定で必要なファイルだけ）。正解 MIDI 付きの実ドラムの小さな評価セット | `python analysis/fetch_egmd_sample.py --n 14 --out data/egmd_sample --stems-out data/egmd_stems` |
+| `fetch_stemgmd_sample.py` | StemGMD（CC BY 4.0）の評価用セッションから、パート別の単独録音（分離の本当の正解）が付いた曲を取る | `python analysis/fetch_stemgmd_sample.py --n 12 --out data/stemgmd_stems` |
 | `make_demo_kit.py` | 合成音からデモ用のキット（kit.json と WAV）を作る（プラグインの確認用） | `python analysis/make_demo_kit.py data/kits/demo` |
 | `train_transcriber.py` | 小さな CRNN を学習し ONNX に書き出す。合成データ（`--steps`）か E-GMD（`--egmd`）。`--finetune-stems` で実ステムの疑似ラベルに合わせる微調整（`--holdout all` で leave-one-out） | `python analysis/train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\stems --epochs 8 --out analysis/models/crnn_egmd_v1.onnx` |
 | `eval_egmd.py` | ONNX の採譜モデルを E-GMD の test 分割で測る（正解は MIDI） | `python analysis/eval_egmd.py analysis/models/crnn_egmd_v1.onnx D:\data\e-gmd-v1.0.0` |
@@ -46,7 +48,7 @@ pip install -r analysis/requirements-ml.txt
 
 ## 切り出しとキット（`drumeval/extract.py`）
 
-- 前 0.1 秒・後 0.15 秒に他の打が無い打だけを切り出し、次の打の直前（上限 1.5 秒）まで取る。
+- 前 0.1 秒・後 0.15 秒に他の打が無い打だけを切り出し、次の打の直前まで取る。上限は、混ざったドラムからは 1.5 秒、パート別の切り出しでは種類ごと（`MAX_LEN_SEC`: キック・スネア・ハイハット 1.5 秒、タム 2 秒、シンバル 4 秒。シンバルを 1.5 秒で切ると余韻のぶん高域が減る）。
 - 種類ごとにピークの大きさで層（既定 3）に分け、層の中の複数の打をラウンドロビン（既定 3）にする。打が少ない種類は層を減らす（方式 A）。
 - `build_kit_by_features`: 特徴（ピーク dB、減衰時間、スペクトル重心）の k-means で種類ごとに代表音を残し、`render_kit(..., hit_features=, hit_levels_db=, gain_match=True, choke=True)` で各打に最も近い音を選び、音量を合わせ、同じ種類の次の打で止める（方式 C）。合成音では A 0.75 → C 0.44（自己再現 0.10）。
 - 打点に強さが無ければ、打点直後 20 ms のピークを種類ごとの分布で 1〜127 に割り当てる（計画書 3.2）。
@@ -55,9 +57,12 @@ pip install -r analysis/requirements-ml.txt
 
 ## パート分け（`drumeval/nmfd.py`）
 
-- NMFD（非負値行列因子分解の畳み込み版）。採譜の打点を活性の初期値にし、種類ごとに「打点の後に活性を許す長さ」（キック 0.3 秒、シンバル 1.5 秒など）と帯域の重みを与え、KL ダイバージェンスの乗法更新を回して Wiener マスクで分ける。残差の成分（にじみ・残響を吸う）は既定で有効。パートの和は元に等しい（残差込み）。
-- 合成音では、正しい打点でスネア 15〜19 dB、ハイハット 40〜50 dB、キック 9 dB、シンバルは 0 dB 前後（キックと同時のクラッシュをうまく分けられない）。採譜の誤り（20% 欠け、10% 偽）があると各 5〜10 dB 下がる。実ステムでは SpectraLayers のパート別ステムを正解の代わりに SNR で測る（`run_eval.py --parts nmfd`）。区分 A の 10 曲（v5 の打点）では キック +11.5 dB、スネア +2.1、ハイハット −0.2、シンバル −2.2 で、聞き比べは良好。差の主因は初期値にした打点の取りこぼし（`docs/phase0/結果/2026-11-12_NMFD実ステム.md`）。`--parts nmfd-oracle` は疑似正解の打点を初期値にして分離の質だけを見る。`--nmfd-no-residual` は残差の成分を使わず、パートの和を元に等しくする。
-- 学習モデルを使わないので権利が明確で軽い。質が足りなければ StemGMD で学習するモデル（計画書 3.3 の (1)）へ。
+- NMFD（非負値行列因子分解の畳み込み版）。採譜の打点で活性を縛る: 各打に「窓」（打点の少し前から、同じ種類の次の打の手前まで。上限はキック 1 秒、スネア・タム 1.5 秒、ハイハット 1 秒、シンバル 4 秒）を作り、活性は窓の中だけ許す。窓の中は自由なので、余韻も、同じ種類の取りこぼした打も、そのパートが受ける。KL ダイバージェンスの乗法更新を 40 回まわし、Wiener マスクで分ける。パートと残差の和は元に等しい。
+- 残差の成分は、どのパートでも説明できない音（窓の外の取りこぼした打、打点の無いパーカッション、にじみ）を受ける。残差の活性には軽い罰（`residual_penalty` 0.5）を掛け、ドラムで説明できる残響や余韻まで残差が取らないようにする。ハイハットとシンバルのひな形には低域（300 Hz／200 Hz 未満）を持たせず、取りこぼしたキックがこれらのパートへ流れ込むのを防ぐ。タムの打が 4 つ以上あればタムのパートも作る（`parts_for_hits`）。
+- **2026-11-15 に直した不具合**: それまでは「打点からの距離で 1 → 0 に下がる係数」を更新のたびに活性へ掛けていた。係数は打点のフレームでもハイハット 0.83・キック 0.93 で、40 回で累積するので、打点の後の音（余韻、残響）がパートから消えて残差に落ち、再現が「こもる」「痩せる」。正解の打点でも自己再現の距離が 2.6 あった（直した後 0.2）。比較用に従来の設定を残してある（`NMFDConfig(**LEGACY)`、`run_eval.py --nmfd-legacy`）。
+- 計算は行列積にまとめてある（40 秒の音で数秒）。`compute_masks`／`apply_masks` でマスクを取り出せば、別の信号（本当のパート、にじみ）がどのパートへ行くかを測れる。
+- 測り方: クラウドでも手元でも、`fetch_stemgmd_sample.py`（本当のパートがある。SN 比）と `fetch_egmd_sample.py`（タム・シンバル・電子系のキットがある。再現の距離と帯域の差）の標本に `run_eval.py --parts nmfd-oracle` を掛ける。区分 A では SpectraLayers のパート別ステムが SN 比の基準になるが、分け方の違い（ハットとシンバル）で大きく負になることがあり、目安にとどまる。数字は `docs/phase0/結果/2026-11-15_段階1の聞き比べ_と_NMFDの修正.md`。
+- 学習モデルを使わないので権利が明確で軽い。弱いのは、スネアと同時に鳴るハイハット（スペクトルが重なる）とライドシンバル。質が足りなければ StemGMD で学習するモデル（計画書 3.3 の (1)）へ。
 
 ## エフェクトの当てはめ（`drumeval/fx.py`）
 

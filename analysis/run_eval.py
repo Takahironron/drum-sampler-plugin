@@ -179,7 +179,8 @@ def parse_kit_size(text: str) -> dict[str, int]:
 def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song_id: str | None = None, wav: Path | None = None,
                   model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: str = "24",
                   choke: str = "all", start_sec: float | None = None, fit_fx: bool = False, fit_seconds: float = 20.0,
-                  parts_mode: str = "sl", save_kit_dir: str | None = None, nmfd_residual: bool = True, nmfd_options: dict | None = None) -> dict:
+                  parts_mode: str = "sl", save_kit_dir: str | None = None, nmfd_residual: bool = True, nmfd_options: dict | None = None,
+                  nmfd_legacy: bool = False) -> dict:
     wav = wav or find_stem(song_dir)
     x_full, sr = load_mono(str(wav), None)
     # 評価の開始位置: start.txt → --start → ドラムが鳴り始める位置の自動検出（キックとスネアのパート別ステムがあればその合計で）
@@ -258,10 +259,14 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
     elif parts_mode == "nmfd-oracle" and ref is not None:
         nmfd_hits = ref  # NMFD の上限: 疑似正解の打点（分離の質だけを見る）
     if nmfd_hits:
-        from drumeval.nmfd import NMFDConfig, parts_for_hits, separate, snr_db
+        from drumeval.nmfd import LEGACY, PARTS, config_for, parts_for_hits, separate, snr_db
 
-        ncfg = NMFDConfig(n_fft=2048 if sr >= 40000 else 1024, hop=512 if sr >= 40000 else 256, residual=nmfd_residual, **(nmfd_options or {}))
-        nmfd_parts = parts_for_hits(nmfd_hits)  # タムの打が十分あればタムのパートも作る
+        if nmfd_legacy:  # 2026-11-15 より前の設定（比較用）: 係数が累積する縛り方、短い窓、4 パート
+            ncfg = config_for(sr, residual=nmfd_residual, **LEGACY)
+            nmfd_parts = PARTS
+        else:
+            ncfg = config_for(sr, residual=nmfd_residual, **(nmfd_options or {}))
+            nmfd_parts = parts_for_hits(nmfd_hits)  # タムの打が十分あればタムのパートも作る
         sep = separate(x, sr, nmfd_hits, ncfg, parts=nmfd_parts)
         part_audio = {c: (sep[c], sr) for c in nmfd_parts}
         if sl_parts:
@@ -296,8 +301,12 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
         # 帯域ごとの差（dB）。パートの和は絶対的な差（残差に落ちた分）、再現は音量をそろえた後の差（高域が負なら「こもる」）
         row["bands_sum_db"] = band_balance_db(x, total, sr, match_rms=False)
         row["bands_sum"] = _fmt_bands(row["bands_sum_db"])
-        write_hits_midi(ref_v, song_dir / ("hits_model.mid" if parts_mode == "nmfd" else "hits_pseudo.mid"))  # DAW で確かめる用
-        row["parts_mode"] = parts_mode + ("" if nmfd_residual or not parts_mode.startswith("nmfd") else "（残差なし）")
+        if parts_mode == "nmfd":
+            write_hits_midi(ref_v, song_dir / "hits_model.mid")  # モデルの打点（DAW で確かめる用）
+        elif row.get("truth", "").startswith("疑似"):
+            write_hits_midi(ref_v, song_dir / "hits_pseudo.mid")  # 疑似正解（本当の正解がある曲では書かない）
+        row["parts_mode"] = parts_mode + ("" if nmfd_residual or not parts_mode.startswith("nmfd") else "（残差なし）") + (
+            "（従来の設定）" if nmfd_legacy and parts_mode.startswith("nmfd") else "")
         ys = _match_rms(self_render_from_parts(part_audio, ref_v, x.size / sr), x)
         row["stft_self"] = multi_resolution_stft_distance(x, ys)["total"]  # 自己再現: 打点の誤りと区間の切り方だけの損失
         row["bands_self_db"] = band_balance_db(x, ys, sr)
@@ -509,6 +518,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="パート別の切り出しに使うパート: sl = 分離ツールのパート別ステムと疑似正解、nmfd = 推定の打点を初期値にした NMFD（製品の経路）、"
                          "nmfd-oracle = 疑似正解の打点を初期値にした NMFD（分離の質だけを見る上限）")
     ap.add_argument("--nmfd-no-residual", action="store_true", help="NMFD で残差の成分を使わない（パートの和を元に等しくする）")
+    ap.add_argument("--nmfd-legacy", action="store_true",
+                    help="NMFD を 2026-11-15 より前の設定で動かす（比較用。打点の後の音がパートから消え、再現がこもる）")
     ap.add_argument("--save-kit", default=None, metavar="DIR",
                     help="方式 C のキット（代表音の WAV と kit.json）を各曲のフォルダの DIR に保存する（プラグインで読める。例: kit）")
     ap.add_argument("--fit-fx", action="store_true", help="M0-3 を実ステムで測る: 合成キットの乾いた音に固定チェーンを当てはめ、前後の距離を出す（1 曲 2〜3 分）")
@@ -539,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{song_id} ({f.name}) ...", file=sys.stderr)
         rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke, start_sec=args.start,
                                   fit_fx=args.fit_fx, fit_seconds=args.fit_seconds, parts_mode=args.parts,
-                                  save_kit_dir=args.save_kit, nmfd_residual=not args.nmfd_no_residual))
+                                  save_kit_dir=args.save_kit, nmfd_residual=not args.nmfd_no_residual, nmfd_legacy=args.nmfd_legacy))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)

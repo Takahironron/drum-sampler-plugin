@@ -82,6 +82,19 @@ class Kit:
 
 CHOKE_CLASSES = {"kick", "snare", "hihat", "tom"}  # 同じ種類の次の打で音を止める（シンバルは重ねる）
 
+# パート別の切り出しで、一打の区間の上限（秒）。シンバルは余韻が長い（クラッシュは 3〜6 秒鳴る）ので長く取る。
+# 全種類 1.5 秒で切ると、シンバルの余韻のぶん高域が減る
+MAX_LEN_SEC: dict[str, float] = {"kick": 1.5, "snare": 1.5, "hihat": 1.5, "tom": 2.0, "cymbal": 4.0}
+
+
+def max_len_for(cls: str, max_len_sec: float | dict[str, float] | None = None) -> float:
+    """種類ごとの区間の上限。`max_len_sec` が None なら `MAX_LEN_SEC`、辞書ならその種類の値、数ならその値。"""
+    if max_len_sec is None:
+        return MAX_LEN_SEC.get(cls, 1.5)
+    if isinstance(max_len_sec, dict):
+        return float(max_len_sec.get(cls, MAX_LEN_SEC.get(cls, 1.5)))
+    return float(max_len_sec)
+
 
 def select_isolated_hits(hits: list[Hit], pre_sec: float = 0.1, post_sec: float = 0.15) -> list[tuple[Hit, float]]:
     """重ならない打と、その打に使える長さ（次の打までの秒数）を返す。"""
@@ -129,17 +142,17 @@ def cut_segments_from_parts(
     hits: list[Hit],
     pre_sec: float = 0.1,
     post_sec: float = 0.15,
-    max_len_sec: float = 1.5,
+    max_len_sec: float | dict[str, float] | None = None,
 ) -> list[Segment]:
     """パート別に分離された音（種類 → (波形, sr)）から切り出す。
 
     他の種類の打は別のステムにあるので、重なりの判定は同じ種類の打どうしだけで行う。
-    混ざったドラムから切るより、切り出せる打がずっと多くなる。
+    混ざったドラムから切るより、切り出せる打がずっと多くなる。区間の上限は種類ごと（`MAX_LEN_SEC`）。
     """
     segs: list[Segment] = []
     for cls, (x, sr) in parts.items():
         own = [h for h in hits if to_coarse(h.cls) == cls]
-        segs += cut_segments(x, sr, own, pre_sec=pre_sec, post_sec=post_sec, max_len_sec=max_len_sec)
+        segs += cut_segments(x, sr, own, pre_sec=pre_sec, post_sec=post_sec, max_len_sec=max_len_for(cls, max_len_sec))
     return segs
 
 
@@ -147,7 +160,7 @@ def self_render_from_parts(
     parts: dict[str, tuple[np.ndarray, int]],
     hits: list[Hit],
     duration: float,
-    max_len_sec: float = 1.5,
+    max_len_sec: float | dict[str, float] | None = None,
     fade_out_sec: float = 0.01,
 ) -> np.ndarray:
     """各打を「その打自身の区間」（打点から同じ種類の次の打まで）で鳴らし直す（自己再現）。
@@ -160,10 +173,11 @@ def self_render_from_parts(
     out = np.zeros(n)
     for cls, (x, psr) in parts.items():
         own = sorted((h for h in hits if to_coarse(h.cls) == cls), key=lambda h: h.time)
+        limit = max_len_for(cls, max_len_sec)
         for i, h in enumerate(own):
             start = int(round(h.time * psr))
-            next_t = own[i + 1].time if i + 1 < len(own) else h.time + max_len_sec
-            end = min(start + int(min(next_t - h.time, max_len_sec) * psr), x.size, n)
+            next_t = own[i + 1].time if i + 1 < len(own) else h.time + limit
+            end = min(start + int(min(next_t - h.time, limit) * psr), x.size, n)
             if end - start < int(0.005 * psr):
                 continue
             a = x[start:end].copy()
@@ -282,8 +296,9 @@ def build_kit_by_features(segments: list[Segment], sr: int, n_per_class: int | d
     return Kit(sr, parts, feat_norm)
 
 
-def hit_segments_from_parts(parts: dict[str, tuple[np.ndarray, int]], hits: list[Hit], max_len_sec: float = 1.5) -> list[np.ndarray | None]:
-    """各打の「自分の区間」（打点から同じ種類の次の打まで、上限 max_len_sec）をパート別ステムから取る。hits と同じ順。"""
+def hit_segments_from_parts(parts: dict[str, tuple[np.ndarray, int]], hits: list[Hit],
+                            max_len_sec: float | dict[str, float] | None = None) -> list[np.ndarray | None]:
+    """各打の「自分の区間」（打点から同じ種類の次の打まで、上限は種類ごと）をパート別ステムから取る。hits と同じ順。"""
     out: list[np.ndarray | None] = [None] * len(hits)
     by_cls: dict[str, list[int]] = {}
     for i, h in enumerate(hits):
@@ -293,11 +308,12 @@ def hit_segments_from_parts(parts: dict[str, tuple[np.ndarray, int]], hits: list
             continue
         x, sr = parts[cls]
         idx = sorted(idx, key=lambda i: hits[i].time)
+        limit = max_len_for(cls, max_len_sec)
         for k, i in enumerate(idx):
             t = hits[i].time
-            next_t = hits[idx[k + 1]].time if k + 1 < len(idx) else t + max_len_sec
+            next_t = hits[idx[k + 1]].time if k + 1 < len(idx) else t + limit
             start = int(round(t * sr))
-            end = min(start + int(min(next_t - t, max_len_sec) * sr), x.size)
+            end = min(start + int(min(next_t - t, limit) * sr), x.size)
             if end - start >= int(0.005 * sr):
                 out[i] = x[start:end]
     return out
