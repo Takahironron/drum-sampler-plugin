@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -44,15 +45,22 @@ from drumeval.stems import (  # noqa: E402,F401  (find_stem などは drumeval.s
 )
 
 
-def pseudo_truth_from_parts(parts: dict[str, Path], max_seconds: float, sr_target: int | None, start_sec: float = 0.0) -> list[Hit]:
-    """パート別ステムの打点検出を「疑似的な正解」にする。分離の誤りはそのまま残るので目安。時刻は start_sec からの相対。"""
+def pseudo_truth_from_parts(parts: dict[str, Path], max_seconds: float, sr_target: int | None, start_sec: float = 0.0,
+                            levels_out: dict[str, np.ndarray] | None = None) -> list[Hit]:
+    """パート別ステムの打点検出を「疑似的な正解」にする。分離の誤りはそのまま残るので目安。時刻は start_sec からの相対。
+
+    `levels_out` を渡すと、種類ごとの打の大きさ（大きい打を 0 dB とした相対値）を入れる（小さい打が多いステムは漏れを疑う）。
+    """
     hits: list[Hit] = []
     for cls, path in parts.items():
         x, sr = load_mono(str(path), sr_target)
         x = x[int(start_sec * sr) :]
         if max_seconds and x.size > max_seconds * sr:
             x = x[: int(max_seconds * sr)]
-        for t in onsets_from_part(x, sr):
+        times, levels = onsets_from_part(x, sr, cls=cls, return_levels=True)
+        if levels_out is not None:
+            levels_out[cls] = levels
+        for t in times:
             hits.append(Hit(float(t), cls, None))
     hits.sort(key=lambda h: h.time)
     return hits
@@ -180,8 +188,14 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
                   model: str | None = None, render: bool = False, threshold: float | None = None, kit_size: str = "24",
                   choke: str = "all", start_sec: float | None = None, fit_fx: bool = False, fit_seconds: float = 20.0,
                   parts_mode: str = "sl", save_kit_dir: str | None = None, nmfd_residual: bool = True, nmfd_options: dict | None = None,
-                  nmfd_legacy: bool = False) -> dict:
+                  nmfd_legacy: bool = False, tag: str = "") -> dict:
     wav = wav or find_stem(song_dir)
+
+    def out_path(name: str) -> Path:
+        """書き出すファイルの置き場。`tag` があれば名前の末尾に付ける（rerender_parts_v5.wav）。モデルを替えた結果を並べて聞ける。"""
+        base, ext = name.rsplit(".", 1)
+        return song_dir / (f"{base}_{tag}.{ext}" if tag else name)
+
     x_full, sr = load_mono(str(wav), None)
     # 評価の開始位置: start.txt → --start → ドラムが鳴り始める位置の自動検出（キックとスネアのパート別ステムがあればその合計で）
     start = resolve_start(song_dir, x_full, sr, start_sec, load=lambda path, target_sr: load_mono(str(path), target_sr)[0])
@@ -212,8 +226,13 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
         ref = [Hit(h.time - start, h.cls, h.velocity) for h in load_hits(truth_path) if 0.0 <= h.time - start < x.size / sr]
         row["truth"] = "正解"
     elif all(c in parts for c in M0_CLASSES):
-        ref = pseudo_truth_from_parts(parts, x.size / sr, sr, start)  # シンバル・タムのステムがあればそれも含める
+        levels: dict[str, np.ndarray] = {}
+        ref = pseudo_truth_from_parts(parts, x.size / sr, sr, start, levels_out=levels)  # シンバル・タムのステムがあればそれも含める
         row["truth"] = "疑似（パート別ステム）"
+        # 種類ごとの打の大きさの分布: 0〜−10 ／ −10〜−20 ／ −20〜−30 dB の数。小さい側が多いステムは、漏れを打として数えている恐れがある
+        row["pseudo_levels"] = " ".join(
+            f"{c[:2]}{int(np.sum(v > -10))}/{int(np.sum((v <= -10) & (v > -20)))}/{int(np.sum(v <= -20))}"
+            for c, v in ((c, levels[c]) for c in ("kick", "snare", "hihat", "tom", "cymbal") if c in levels))
         from drumeval import save_hits_csv
 
         # 先頭のコメント行に区間とラベルのあるパートを書く（微調整 `train_transcriber.py --finetune-stems` が読む）
@@ -240,7 +259,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
         if render:
             import soundfile as sf
 
-            sf.write(song_dir / "rerender_mix.wav", (y / (np.max(np.abs(y)) + 1e-9) * 0.9).astype(np.float32), sr)
+            sf.write(out_path("rerender_mix.wav"), (y / (np.max(np.abs(y)) + 1e-9) * 0.9).astype(np.float32), sr)
 
     # 切り出し (2): パート別ステムから、パートごとの打点で
     #   parts_mode="sl":   分離ツール（SpectraLayers）のパート別ステムと、その打点検出（疑似正解）
@@ -282,9 +301,9 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             import soundfile as sf
 
             for c, (px, psr) in part_audio.items():
-                sf.write(song_dir / f"nmfd_{c}.wav", px.astype(np.float32), psr)
+                sf.write(out_path(f"nmfd_{c}.wav"), px.astype(np.float32), psr)
             if "residual" in sep:
-                sf.write(song_dir / "nmfd_residual.wav", sep["residual"].astype(np.float32), sr)
+                sf.write(out_path("nmfd_residual.wav"), sep["residual"].astype(np.float32), sr)
     elif parts and ref is not None:
         part_audio = {c: v for c, v in sl_parts.items() if np.sqrt(np.mean(v[0] ** 2)) > 1e-5}  # 無音のパートは除く
         for c, (px, psr) in part_audio.items():
@@ -302,7 +321,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
         row["bands_sum_db"] = band_balance_db(x, total, sr, match_rms=False)
         row["bands_sum"] = _fmt_bands(row["bands_sum_db"])
         if parts_mode == "nmfd":
-            write_hits_midi(ref_v, song_dir / "hits_model.mid")  # モデルの打点（DAW で確かめる用）
+            write_hits_midi(ref_v, out_path("hits_model.mid"))  # モデルの打点（DAW で確かめる用）
         elif row.get("truth", "").startswith("疑似"):
             write_hits_midi(ref_v, song_dir / "hits_pseudo.mid")  # 疑似正解（本当の正解がある曲では書かない）
         row["parts_mode"] = parts_mode + ("" if nmfd_residual or not parts_mode.startswith("nmfd") else "（残差なし）") + (
@@ -356,7 +375,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             if render:
                 import soundfile as sf
 
-                sf.write(song_dir / "rerender_parts_embed.wav", (yd / (np.max(np.abs(yd)) + 1e-9) * 0.9).astype(np.float32), sr)
+                sf.write(out_path("rerender_parts_embed.wav"), (yd / (np.max(np.abs(yd)) + 1e-9) * 0.9).astype(np.float32), sr)
             # M0-3 を実ステムで: 疑似正解の打点を合成の汎用キットで鳴らした音を「乾いた音」とし、固定チェーンを元のステムに当てはめる
             if fit_fx:
                 from drumeval.fx import apply_chain, fit_chain
@@ -393,17 +412,17 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             if render:
                 import csv as _csv
 
-                with open(song_dir / "timeline.csv", "w", newline="", encoding="utf-8") as f:
+                with open(out_path("timeline.csv"), "w", newline="", encoding="utf-8") as f:
                     w = _csv.DictWriter(f, fieldnames=list(tl[0].keys()))
                     w.writeheader()
                     w.writerows(tl)
             if render:
                 import soundfile as sf
 
-                sf.write(song_dir / "rerender_parts_3x3.wav", (yp / (np.max(np.abs(yp)) + 1e-9) * 0.9).astype(np.float32), sr)
-                sf.write(song_dir / "rerender_parts.wav", (yc / (np.max(np.abs(yc)) + 1e-9) * 0.9).astype(np.float32), sr)
-                sf.write(song_dir / "rerender_self.wav", (ys / (np.max(np.abs(ys)) + 1e-9) * 0.9).astype(np.float32), sr)
-                write_audition(kit_f, song_dir / "kit_parts_audition.wav")
+                sf.write(out_path("rerender_parts_3x3.wav"), (yp / (np.max(np.abs(yp)) + 1e-9) * 0.9).astype(np.float32), sr)
+                sf.write(out_path("rerender_parts.wav"), (yc / (np.max(np.abs(yc)) + 1e-9) * 0.9).astype(np.float32), sr)
+                sf.write(out_path("rerender_self.wav"), (ys / (np.max(np.abs(ys)) + 1e-9) * 0.9).astype(np.float32), sr)
+                write_audition(kit_f, out_path("kit_parts_audition.wav"))
             if save_kit_dir:
                 from drumeval.extract import save_kit
 
@@ -424,11 +443,12 @@ def resolve_model_path(model: str | None, song_id: str) -> str | None:
 
 
 def to_markdown(rows: list[dict], title: str) -> str:
-    cols = ("id", "start", "seconds", "est_source", "truth", "parts_mode", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts",
+    cols = ("id", "start", "seconds", "est_source", "truth", "parts_mode", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts", "pseudo_levels",
             "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_gain_choke",
             "kit_features", "stft_parts_features_all", "stft_parts_features_hihat", "stft_parts_features_none", "stft_parts_ceiling",
             "stft_parts_embed", "stft_parts_embed_ceiling", "loss_shares", "stft_self", "stft_parts_sum", "bands_sum", "bands_self", "bands_c", "nmfd_snr", "fx_before", "fx_after", "fx_params")
     heads = ("曲ID", "開始秒", "秒", "推定", "正解の種類", "パートの出どころ", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
+             "疑似正解の打の大きさ（0〜−10／−10〜−20／−20〜−30 dB の数）",
              "重ならない打（混合）", "層/音（混合）", "STFT（混合）", "重ならない打（パート別）", "層/音（パート別 3層×3音）", "STFT（A: 3層×3音）",
              "STFT（B: A＋音量合わせ＋チョーク）", "音の数（C: 特徴で選ぶ）", "STFT（C: チョーク全部）", "STFT（C: ハイハットだけ）", "STFT（C: チョーク無し）",
              "STFT（上限: 全部を代表・自分以外）", "STFT（D: 埋め込みで選ぶ）", "STFT（D の上限）",
@@ -447,6 +467,9 @@ def to_markdown(rows: list[dict], title: str) -> str:
         lines.append(f"- M0-1（kick/snare/hihat の F の平均）の平均: {np.mean(m0_true):.3f}（目安 0.85）")
     if m0_pseudo:
         lines.append(f"- 疑似正解に対する M0-1 の平均: {np.mean(m0_pseudo):.3f}（分離ツールのパート分けの誤りを含むので目安。M0 の判定には使わない）")
+        lines.append("- 疑似正解は、パート別ステムの包絡（その種類の帯域）が直前 60 ms の平均を 6 dB 以上超えた立ち上がり。大きい打（上位 5%）より 30 dB 以上小さいものは捨てる"
+                     "（余韻の揺れ、他の種類の漏れ）。**2026-11-15 に作り直した**: それまではキックを約 3 倍に数え過ぎていたので、これより前の表の「正解の打」と F 値とは比べられない。"
+                     "「疑似正解の打の大きさ」の右側（−20〜−30 dB）が多い種類は、漏れを打として数えている恐れがある。")
     d = [r["stft_rerender"] for r in rows if "stft_rerender" in r]
     if d:
         lines.append(f"- 再現との STFT 距離の平均（混ざったドラムから切り出し）: {np.mean(d):.3f}（M0-2 の聞き比べの参考。小さいほど近い）")
@@ -518,6 +541,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="パート別の切り出しに使うパート: sl = 分離ツールのパート別ステムと疑似正解、nmfd = 推定の打点を初期値にした NMFD（製品の経路）、"
                          "nmfd-oracle = 疑似正解の打点を初期値にした NMFD（分離の質だけを見る上限）")
     ap.add_argument("--nmfd-no-residual", action="store_true", help="NMFD で残差の成分を使わない（パートの和を元に等しくする）")
+    ap.add_argument("--tag", default="",
+                    help="--render などで書き出すファイルの名前の末尾に付ける印（英数字と _ -）。例: --tag v5 で rerender_parts_v5.wav。"
+                         "モデルを替えた結果を上書きせずに並べて聞ける（original_cut.wav には付かない）")
     ap.add_argument("--nmfd-legacy", action="store_true",
                     help="NMFD を 2026-11-15 より前の設定で動かす（比較用。打点の後の音がパートから消え、再現がこもる）")
     ap.add_argument("--save-kit", default=None, metavar="DIR",
@@ -525,6 +551,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fit-fx", action="store_true", help="M0-3 を実ステムで測る: 合成キットの乾いた音に固定チェーンを当てはめ、前後の距離を出す（1 曲 2〜3 分）")
     ap.add_argument("--fit-seconds", type=float, default=20.0, help="当てはめに使う長さ（秒）")
     args = ap.parse_args(argv)
+    if args.tag and not re.fullmatch(r"[A-Za-z0-9_-]+", args.tag):
+        ap.error("--tag は英数字と _ - だけにする")
 
     stems_dir = Path(args.stems_dir)
     if not stems_dir.exists():
@@ -550,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{song_id} ({f.name}) ...", file=sys.stderr)
         rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke, start_sec=args.start,
                                   fit_fx=args.fit_fx, fit_seconds=args.fit_seconds, parts_mode=args.parts,
-                                  save_kit_dir=args.save_kit, nmfd_residual=not args.nmfd_no_residual, nmfd_legacy=args.nmfd_legacy))
+                                  save_kit_dir=args.save_kit, nmfd_residual=not args.nmfd_no_residual, nmfd_legacy=args.nmfd_legacy, tag=args.tag))
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)

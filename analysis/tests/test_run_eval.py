@@ -74,3 +74,38 @@ def test_detect_drum_start_skips_silent_intro():
     start = detect_drum_start(x, sr)
     assert 7.0 <= start <= 9.0
     assert detect_drum_start(render(_sparse_pattern(4), sr=sr), sr) == 0.0
+
+
+def test_render_tag_keeps_results_side_by_side(tmp_path):
+    """--tag を付けると、書き出す WAV の名前の末尾に印が付く（モデルを替えた結果を上書きせずに並べて聞ける）。
+    印の付いたファイルも、次の実行でステムやパート別ステムとして拾われない。"""
+    import soundfile as sf
+
+    from drumeval.labels import to_coarse
+    from drumeval.stems import find_part_stems, find_stem
+    from tests.test_pipeline import _rock_pattern
+
+    sr = 22050
+    ref = _rock_pattern(4)
+    dur = max(h.time for h in ref) + 1.2
+    song = tmp_path / "stems" / "a01"
+    song.mkdir(parents=True)
+    mix = np.zeros(int(dur * sr))
+    for cls, name in (("kick", "キック"), ("snare", "スネア"), ("hihat", "ハイハット")):
+        part = render([h for h in ref if to_coarse(h.cls) == cls], sr=sr, duration=dur)
+        sf.write(song / f"{name}.wav", part.astype(np.float32), sr)
+        mix += part
+    sf.write(song / "drum.wav", (mix / np.max(np.abs(mix)) * 0.9).astype(np.float32), sr)
+    script = Path(__file__).resolve().parents[1] / "run_eval.py"
+    for tag in ("v5", "ft"):
+        r = subprocess.run([sys.executable, str(script), str(tmp_path / "stems"), "--parts", "nmfd-oracle", "--render", "--tag", tag],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+    names = {p.name for p in song.iterdir()}
+    for tag in ("v5", "ft"):
+        assert {f"rerender_parts_{tag}.wav", f"rerender_self_{tag}.wav", f"nmfd_kick_{tag}.wav", f"kit_parts_audition_{tag}.wav"} <= names
+    assert "original_cut.wav" in names and "rerender_parts.wav" not in names
+    assert find_stem(song).name == "drum.wav"
+    assert {c: p.name for c, p in find_part_stems(song).items()} == {"kick": "キック.wav", "snare": "スネア.wav", "hihat": "ハイハット.wav"}
+    r = subprocess.run([sys.executable, str(script), str(tmp_path / "stems"), "--tag", "bad tag"], capture_output=True, text=True)
+    assert r.returncode != 0 and "--tag" in r.stderr
