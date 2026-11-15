@@ -78,14 +78,30 @@ def load_audio(path: str | Path, sr_target: int, start_sec: float = 0.0, dur_sec
     return x
 
 
+# 評価の道具（run_eval.py）が曲フォルダに書き出す音声の名前の頭。どれもドラムの音を含むので、
+# パート別ステムやにじみ用の音として拾わない（nmfd_kick.wav は名前が「_kick」で終わり、nmfd_residual.wav・synthkit_*.wav は
+# ドラム系の名前を含まない）。run_eval.py に書き出しを足したら、ここにも足す。
+TOOL_OUTPUT_PREFIXES = ("rerender", "original_cut", "nmfd_", "synthkit_", "kit_parts_audition")
+
+
+def is_tool_output(path: str | Path) -> bool:
+    """評価の道具が書き出した音声か（聞き比べ用の WAV、NMFD のパートと残差、合成キットの音）。"""
+    return Path(path).name.lower().startswith(TOOL_OUTPUT_PREFIXES)
+
+
 def collect_bleed_files(folder: str | Path) -> list[Path]:
-    """にじみ用の音声（ドラム以外のステム）。ドラム系の名前と、評価で作った WAV は除く。"""
+    """にじみ用の音声（ドラム以外のステム）。ドラム系の名前、評価で作った WAV、`--save-kit` で保存したキットの中身は除く。"""
     skip = ("drum", "ドラム", "キック", "スネア", "ハイハット", "シンバル", "タム", "kick", "snare", "hihat", "cymbal", "tom",
             "rerender", "original_cut", "audition")
+    folder = Path(folder)
+    kit_dirs = {p.parent for p in folder.rglob("kit.json")}  # 保存したキット（切り出したドラムの音。<種類>/layerN_rrM.wav）
     out = []
-    for p in sorted(Path(folder).rglob("*")):
-        if p.suffix.lower() in AUDIO_EXT and not any(k in p.stem.lower() for k in skip):
-            out.append(p)
+    for p in sorted(folder.rglob("*")):
+        if p.suffix.lower() not in AUDIO_EXT or any(k in p.stem.lower() for k in skip) or is_tool_output(p):
+            continue
+        if any(d in p.parents for d in kit_dirs):
+            continue
+        out.append(p)
     return out
 
 

@@ -152,3 +152,34 @@ def test_finetune_with_egmd_mix(tmp_path):
     assert "E-GMD 検証（初期値のしきい値）前→後" in (tmp_path / "ft_fit.md").read_text(encoding="utf-8")
     assert out.exists() and (tmp_path / "ft_fit.md").exists()  # holdout 無し: 当てはまりの表
     assert "（学習曲の当てはまり）" in (tmp_path / "ft_fit.md").read_text(encoding="utf-8")
+
+
+def test_tool_outputs_are_not_taken_as_stems_or_bleed(tmp_path):
+    """run_eval.py が曲フォルダに書き出す音（NMFD のパート、合成キット、聞き比べ用、保存したキット）を、
+    パート別ステム・ドラムのステム・にじみ用の音として拾わない（フォルダの並び順に頼らない）。"""
+    import soundfile as sf
+
+    from drumeval.egmd import collect_bleed_files, is_tool_output
+    from drumeval.stems import find_part_stems, find_stem
+
+    stems = tmp_path / "stems"
+    song = stems / "a01"
+    _make_song(song, _rock_pattern(2), parts=(("kick", "キック"), ("snare", "スネア"), ("hihat", "ハイハット"), ("cymbal", "シンバル")))
+    silent = np.zeros(2205, dtype=np.float32)
+    outputs = ["nmfd_kick.wav", "nmfd_snare.wav", "nmfd_hihat.wav", "nmfd_cymbal.wav", "nmfd_residual.wav", "synthkit_dry.wav", "synthkit_fx.wav",
+               "rerender_parts.wav", "rerender_self.wav", "rerender_parts_ft_v5.wav", "original_cut.wav", "kit_parts_audition.wav"]
+    for name in outputs + ["ベース.wav", "ギター.wav"]:
+        sf.write(song / name, silent, 22050)
+    (song / "kit" / "kick").mkdir(parents=True)
+    (song / "kit" / "kit.json").write_text("{}", encoding="utf-8")
+    sf.write(song / "kit" / "kick" / "layer1_rr1.wav", silent, 22050)
+    assert all(is_tool_output(song / n) for n in outputs) and not is_tool_output(song / "キック.wav") and not is_tool_output(song / "drum.wav")
+    assert {c: p.name for c, p in find_part_stems(song).items()} == {"kick": "キック.wav", "snare": "スネア.wav", "hihat": "ハイハット.wav", "cymbal": "シンバル.wav"}
+    assert find_stem(song).name == "drum.wav"
+    assert [p.name for p in collect_bleed_files(stems)] == ["ギター.wav", "ベース.wav"]
+    # ドラムのステムが 1 つだけ（名前は自由）で、道具の出力が並んでいても、そのステムを選ぶ
+    solo = stems / "b01"
+    solo.mkdir()
+    for name in ("my_song.wav", "nmfd_residual.wav", "synthkit_dry.wav", "original_cut.wav"):
+        sf.write(solo / name, silent, 22050)
+    assert find_stem(solo).name == "my_song.wav"

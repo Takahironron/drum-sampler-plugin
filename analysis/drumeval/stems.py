@@ -22,7 +22,7 @@ from typing import Callable
 import numpy as np
 import soundfile as sf
 
-from .egmd import CLASSES5, augment, load_audio
+from .egmd import CLASSES5, augment, is_tool_output, load_audio
 from .features import FeatureConfig, frame_targets, log_mel
 from .labels import Hit, load_hits, read_hits_csv_meta, to_coarse
 
@@ -47,15 +47,19 @@ def find_stem(song_dir: Path) -> Path | None:
     sl = [p for p in song_dir.iterdir() if p.suffix.lower() in AUDIO_EXT and p.stem.endswith("_ドラム")]
     if len(sl) == 1:
         return sl[0]
-    audio = [p for p in song_dir.iterdir() if p.suffix.lower() in AUDIO_EXT and not p.name.startswith("rerender")]
+    audio = [p for p in song_dir.iterdir() if p.suffix.lower() in AUDIO_EXT and not is_tool_output(p)]
     return audio[0] if len(audio) == 1 else None
 
 
 def find_part_stems(song_dir: Path) -> dict[str, Path]:
-    """パート別ステム（キック.wav など）があれば 種類 → ファイル を返す。"""
+    """パート別ステム（キック.wav など）があれば 種類 → ファイル を返す。
+
+    評価の道具が書き出した音（`nmfd_kick.wav` など。名前が「_kick」で終わる）は除く。除かないと、フォルダの並び順によっては
+    自前の NMFD の出力が「分離ツールのパート別ステム」として選ばれ、疑似正解と SNR の基準が入れ替わる。
+    """
     out: dict[str, Path] = {}
-    for p in song_dir.iterdir():
-        if p.suffix.lower() not in AUDIO_EXT:
+    for p in sorted(song_dir.iterdir()):
+        if p.suffix.lower() not in AUDIO_EXT or is_tool_output(p):
             continue
         key = p.stem.lower()
         for name, cls in PART_NAMES.items():
