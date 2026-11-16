@@ -79,16 +79,21 @@ def run_dataset(root: Path, workers: int, split: str, max_tracks: int) -> int:
     todo = [(t.key, str(t.audio), str(t.midi)) for t in tracks if t.key not in done]
     print(f"{len(tracks)} 本のうち、測り済み {len(tracks) - len(todo)} 本、これから {len(todo)} 本（{workers} プロセス）。書き先: {out}", flush=True)
     new_file = not out.exists()
-    with open(out, "a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        if new_file:
-            w.writerow(["midi_filename", "offset_ms", "sharpness", "n_hits"])
-        results = map(_measure_row, todo) if workers <= 1 else ProcessPoolExecutor(workers).map(_measure_row, todo, chunksize=8)
-        for i, (key, off, sharp, n) in enumerate(results, 1):
-            w.writerow([key, f"{off:.2f}", f"{sharp:.2f}", n])
-            if i % 200 == 0 or i == len(todo):
-                f.flush()
-                print(f"  {i} / {len(todo)}", flush=True)
+    pool = ProcessPoolExecutor(workers) if workers > 1 and todo else None
+    try:
+        with open(out, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(["midi_filename", "offset_ms", "sharpness", "n_hits"])
+            results = pool.map(_measure_row, todo, chunksize=8) if pool else map(_measure_row, todo)
+            for i, (key, off, sharp, n) in enumerate(results, 1):
+                w.writerow([key, f"{off:.2f}", f"{sharp:.2f}", n])
+                if i % 200 == 0 or i == len(todo):
+                    f.flush()  # 途中で止めても、ここまでは残る
+                    print(f"  {i} / {len(todo)}", flush=True)
+    finally:
+        if pool:
+            pool.shutdown(wait=False, cancel_futures=True)
     allv = read_offsets(base)
     keys = [t.key for t in tracks if t.key in allv]
     print(summarize([allv[k][0] * 1000 for k in keys], [allv[k][1] for k in keys]))
