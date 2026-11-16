@@ -37,16 +37,47 @@ class Track:
     duration: float
     kit: str
     style: str
+    offset: float = 0.0  # 音が MIDI より遅れている秒数（`label_offsets.csv`。打点に足すと音に合う）
+    key: str = ""  # CSV の midi_filename（ずれの一覧の見出し）
 
 
-def read_index(root: str | Path) -> list[Track]:
-    """`e-gmd-v1.0.0.csv` を読み、音声と MIDI の両方があるものだけ返す。"""
+OFFSETS_CSV = "label_offsets.csv"  # `egmd_offsets.py` が書く、ファイルごとのずれの一覧（E-GMD の CSV と同じフォルダ）
+
+
+def find_index_csv(root: str | Path) -> Path:
     root = Path(root)
-    csvs = sorted(root.glob("*.csv")) or sorted(root.glob("*/*.csv"))
+    csvs = [p for p in sorted(root.glob("*.csv")) + sorted(root.glob("*/*.csv")) if p.name != OFFSETS_CSV]
     if not csvs:
         raise FileNotFoundError(f"E-GMD の CSV が見つからない: {root}")
-    csv_path = csvs[0]
+    return csvs[0]
+
+
+def read_offsets(base: str | Path) -> dict[str, tuple[float, float]]:
+    """`label_offsets.csv` を読む: midi_filename → (ずれ 秒, 確かさ)。無ければ空。"""
+    path = Path(base) / OFFSETS_CSV
+    out: dict[str, tuple[float, float]] = {}
+    if not path.exists():
+        return out
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            try:
+                out[row["midi_filename"]] = (float(row["offset_ms"]) / 1000.0, float(row["sharpness"]))
+            except (KeyError, ValueError):
+                continue
+    return out
+
+
+def read_index(root: str | Path, use_offsets: bool = True) -> list[Track]:
+    """`e-gmd-v1.0.0.csv` を読み、音声と MIDI の両方があるものだけ返す。
+
+    同じフォルダに `label_offsets.csv`（`egmd_offsets.py` が書く）があれば、ファイルごとの正解のずれを `Track.offset` に入れる
+    （確かさが `align.MIN_SHARPNESS` 未満のものは 0）。打点は `track_hits` で読むと、ずれを直した時刻になる。
+    """
+    from .align import MIN_SHARPNESS
+
+    csv_path = find_index_csv(root)
     base = csv_path.parent
+    offsets = read_offsets(base) if use_offsets else {}
     tracks: list[Track] = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
@@ -60,8 +91,20 @@ def read_index(root: str | Path) -> list[Track]:
                 dur = float(row.get("duration") or 0.0)
             except ValueError:
                 dur = 0.0
-            tracks.append(Track(ap, mp, row.get("split", "train") or "train", dur, row.get("kit_name", ""), row.get("style", "")))
+            off, sharp = offsets.get(m, (0.0, 0.0))
+            tracks.append(Track(ap, mp, row.get("split", "train") or "train", dur, row.get("kit_name", ""), row.get("style", ""),
+                                off if sharp >= MIN_SHARPNESS else 0.0, m))
     return tracks
+
+
+def track_hits(tr: Track) -> list[Hit]:
+    """トラックの正解の打点（MIDI）。`Track.offset` があれば、その分だけ時刻を直す（音に合う時刻になる）。"""
+    hits = load_hits_midi(tr.midi)
+    if tr.offset:
+        from .align import shift_hits
+
+        hits = shift_hits(hits, tr.offset)
+    return hits
 
 
 def load_audio(path: str | Path, sr_target: int, start_sec: float = 0.0, dur_sec: float | None = None) -> np.ndarray:
@@ -212,7 +255,7 @@ class EGMDChunks:
 
     def hits_of(self, tr: Track) -> list[Hit]:
         if tr.midi not in self._hits_cache:
-            self._hits_cache[tr.midi] = load_hits_midi(tr.midi)
+            self._hits_cache[tr.midi] = track_hits(tr)
         return self._hits_cache[tr.midi]
 
     def __getitem__(self, i: int):

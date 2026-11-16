@@ -206,13 +206,12 @@ def train_synthetic(args) -> int:
 # ---------------------------------------------------------------------------
 
 def load_eval_examples(tracks, cfg: FeatureConfig, seconds: float) -> list[tuple[np.ndarray, list[Hit]]]:
-    from drumeval.egmd import load_audio
-    from drumeval.labels import load_hits_midi
+    from drumeval.egmd import load_audio, track_hits
 
     examples = []
     for tr in tracks:
         x = load_audio(tr.audio, cfg.sr, 0.0, seconds)
-        hits = [h for h in load_hits_midi(tr.midi) if h.time < x.size / cfg.sr]
+        hits = [h for h in track_hits(tr) if h.time < x.size / cfg.sr]  # 正解のずれ（label_offsets.csv）を直した時刻
         examples.append((log_mel(x, cfg), hits))
     return examples
 
@@ -231,7 +230,12 @@ def train_egmd(args) -> int:
     rng = np.random.default_rng(args.seed)
     device = pick_device(args.device)
 
-    tracks = read_index(args.egmd)
+    tracks = read_index(args.egmd, use_offsets=not args.no_label_offsets)
+    n_shifted = sum(1 for t in tracks if abs(t.offset) >= 0.005)
+    # E-GMD の正解の MIDI は、ファイルごとに音とずれていることがある（egmd_offsets.py が測って label_offsets.csv に書く）
+    print(f"正解の時刻のずれの補正: {'しない（--no-label-offsets）' if args.no_label_offsets else f'{n_shifted} 本を 5 ms 以上直す（label_offsets.csv）'}"
+          + ("" if n_shifted or args.no_label_offsets else "。label_offsets.csv が無いか空。先に python analysis/egmd_offsets.py <E-GMD のフォルダ> を走らせる"),
+          flush=True)
     train = [t for t in tracks if t.split == "train"]
     val = [t for t in tracks if t.split == "validation"] or [t for t in tracks if t.split == "test"]
     if not train:
@@ -342,7 +346,9 @@ def train_egmd(args) -> int:
                         {"trained_on": "E-GMD (CC BY 4.0)" + (f" + synthetic {args.synthetic_ratio:g}" if args.synthetic_ratio else ""),
                          "epochs": epoch, "train_tracks": len(train), "kits": len(kits), "hidden": args.hidden, "layers": args.layers, "pools": args.pools,
                          "delta": not args.no_delta, "weights": best_name, "ema": args.ema,
-                         "bleed_files": len(bleed), "val_m0_1": best_m0, "val_scores": {str(k): v for k, v in scores.items()}, "seed": args.seed})
+                         "bleed_files": len(bleed), "bleed_dir": str(args.bleed_dir or ""),  # にじみに使った音の出どころ（製品に入れるモデルは権利の明確な音だけ。R3）
+                         "label_offsets_corrected": n_shifted,  # 正解の時刻のずれを直したトラックの数（0 なら直していない。v5 までは 0）
+                         "val_m0_1": best_m0, "val_scores": {str(k): v for k, v in scores.items()}, "seed": args.seed})
             model.to(device)
     log(f"終了。最良の検証 M0-1 {best_m0:.3f}（しきい値 {best_thr}）。モデル: {out}。ログ: {log_path}")
     return 0
@@ -574,7 +580,7 @@ def finetune_stems(args) -> int:
     if args.egmd:
         import torch
 
-        tracks = read_index(args.egmd)
+        tracks = read_index(args.egmd, use_offsets=not args.no_label_offsets)
         tr = [t for t in tracks if t.split == "train"]
         va = [t for t in tracks if t.split == "validation"] or [t for t in tracks if t.split == "test"]
         rng.shuffle(tr)  # type: ignore[arg-type]
@@ -668,6 +674,8 @@ def main(argv: list[str] | None = None) -> int:
     # E-GMD
     ap.add_argument("--egmd", default=None, help="E-GMD のフォルダ（e-gmd-v1.0.0.csv があるところ）。指定すると E-GMD で学習する")
     ap.add_argument("--bleed-dir", default=None, help="にじみ用にドラム以外のステムを混ぜるフォルダ（任意）")
+    ap.add_argument("--no-label-offsets", action="store_true",
+                    help="E-GMD の正解の時刻のずれ（label_offsets.csv。egmd_offsets.py が書く）を直さない（比較用。v5 まではこの状態）")
     ap.add_argument("--epochs", type=int, default=16)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--max-tracks", type=int, default=8000, help="学習に使うトラック数の上限（0 で全部。v4 から既定 8000）")

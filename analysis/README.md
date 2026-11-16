@@ -34,6 +34,8 @@ pip install -r analysis/requirements-ml.txt
 | `fetch_stemgmd_sample.py` | StemGMD（CC BY 4.0）の評価用セッションから、パート別の単独録音（分離の本当の正解）が付いた曲を取る | `python analysis/fetch_stemgmd_sample.py --n 12 --out data/stemgmd_stems` |
 | `analyze_stem.py` | **解析の参照実装**（計画書のモジュール `Analyzer`）。ドラムのステム 1 本から、キット（`kit.json` と WAV）と打点の MIDI（`hits.mid`）を作る。採譜 → パート分け（NMFD）→ 打点の合わせ直し → 切り出し → 代表音 → 強さ。`--preview` で、そのキットを MIDI だけで鳴らした音（プラグインで鳴る音の予想）も書く | `python analysis/analyze_stem.py ドラム.wav 出力フォルダ --model analysis/models/crnn_egmd_v5.onnx --preview` |
 | `engine_parity.py` | プラグインのエンジン（C++）が Python の参照実装（`render_midi`）と同じ音を出すかを、1 サンプル単位で確かめる（CI の build と engine-parity で毎回） | `python analysis/engine_parity.py make キット 作業フォルダ` → `KitRenderTest キット/kit.json 作業フォルダ/cpp.wav --events 作業フォルダ/events.csv` → `python analysis/engine_parity.py check キット 作業フォルダ` |
+| `egmd_offsets.py` | E-GMD の正解（MIDI）と音の時刻のずれを、ファイルごとに測って `label_offsets.csv` に書く（配布物の 34% が 10 ms 以上、7% が 50 ms 以上ずれている）。学習と採点はこの一覧があれば自動で使う。`--stems` で `run_eval.py` の形のフォルダに `label_offset.txt` を書く | `python analysis/egmd_offsets.py D:\data\e-gmd-v1.0.0`、`python analysis/egmd_offsets.py --stems data/egmd_stems` |
+| `make_bleed_set.py` | 学習の増強に使う「にじみ」（ドラム以外の楽器の音）を自作の合成音で作る（権利の明確な音だけ。製品に入れるモデル用） | `python analysis/make_bleed_set.py data/bleed_synth --minutes 60` |
 | `make_demo_kit.py` | 合成音からデモ用のキット（kit.json と WAV）を作る（プラグインの確認用） | `python analysis/make_demo_kit.py data/kits/demo` |
 | `train_transcriber.py` | 小さな CRNN を学習し ONNX に書き出す。合成データ（`--steps`）か E-GMD（`--egmd`）。`--finetune-stems` で実ステムの疑似ラベルに合わせる微調整（`--holdout all` で leave-one-out） | `python analysis/train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\stems --epochs 8 --out analysis/models/crnn_egmd_v1.onnx` |
 | `eval_egmd.py` | ONNX の採譜モデルを E-GMD の test 分割で測る（正解は MIDI） | `python analysis/eval_egmd.py analysis/models/crnn_egmd_v1.onnx D:\data\e-gmd-v1.0.0` |
@@ -96,6 +98,8 @@ pip install -r analysis/requirements-ml.txt
 - 特徴量は対数メル（22.05 kHz、窓 1024、ホップ 220 ≒ 10 ms、64 バンド）。numpy だけで書き、C++ に同じ計算を移せるようにしている。
 - モデルは小さな CRNN（畳み込み2段 → 双方向 GRU → 各フレーム・各種類の確率）。打点はしきい値と局所最大で拾う。
 - `train_transcriber.py` は、合成データ（`synth.py` の乱数パターン。道具立ての確認用）か E-GMD（`drumeval/egmd.py`。実データ、CC BY 4.0、5 種: kick/snare/hihat/tom/cymbal）で学習し、ONNX に書き出して ONNX Runtime と PyTorch の出力が一致することを確かめる。E-GMD の増強は音量・EQ・にじみ（ドラム以外のステムを混ぜる）・雑音・飽和・残響。手順は `docs/phase0/E-GMD学習の手順.md`。`--finetune-stems data/stems --init-from <.pt> --holdout all` で、`run_eval.py` が書いた疑似正解（`hits_pseudo.csv`）で E-GMD のモデルを短く学習し直す（`drumeval/stems.py`。パートの無い種類は損失から外す。曲ごとの leave-one-out で前後の F を表にする）。CD 曲のステムで学習したモデルは評価用に限る（R3）。疑似正解は 2026-11-15 に作り直したので、それより前の `hits_pseudo.csv` で微調整したモデル（`crnn_ft_v5_*`、`crnn_ft_v5m_*`）はキックを数え過ぎる。微調整をやり直すときは、先に `run_eval.py` を 1 回走らせて疑似正解を書き直す。`--mix-init`（初期値との混合）は試した結果、採らない。
+- **E-GMD の正解の時刻のずれ**（`drumeval/align.py`、`egmd_offsets.py`）: E-GMD の配布物は、正解の MIDI と音がファイルごとに一定量ずれているものがある（標本 67 本: 10 ms 以上 34%、30 ms 以上 15%、50 ms 以上 7%、−73〜+119 ms。test 分割の標本 14 本では 5 本が 30 ms 以上）。`label_offset` が、音の立ち上がりの強さと打点の列の相互相関からファイルごとのずれを測る。`egmd.read_index` は `label_offsets.csv` があれば `Track.offset` に入れ、`egmd.track_hits` が直した時刻の打点を返す（学習の `EGMDChunks`、検証、`eval_egmd.py` が使う）。v5 までのモデルと E-GMD での数字は、直していない。
+- **にじみ**（`drumeval/bleed.py`、`make_bleed_set.py`）: 学習の増強でドラムの音に小さく混ぜる、ドラム以外の楽器の音。v6 からは自作の合成音だけを使う（v5 は区分 A の CD 曲のステムを使ったので評価用）。
 - 学習したモデル（`models/*.onnx`）は原則コミットしない。例外として、合成データで学習した小さな `crnn_synth_v0.onnx`（657 KB）は手元での比較用にコミットしてある。
 
 ## テスト

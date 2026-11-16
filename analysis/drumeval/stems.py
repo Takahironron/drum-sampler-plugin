@@ -99,6 +99,20 @@ def read_start_override(song_dir: Path) -> float | None:
     return None
 
 
+def read_label_offset(song_dir: Path) -> float:
+    """曲フォルダの `label_offset.txt`（秒）。正解の打点（hits.csv／hits.mid）に足すと音に合う。無ければ 0。
+
+    E-GMD の配布物は、正解の MIDI と音がファイルごとにずれていることがある。`egmd_offsets.py --stems` が測って書く。
+    """
+    p = song_dir / "label_offset.txt"
+    if p.exists():
+        try:
+            return float(p.read_text(encoding="utf-8").strip())
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
 def _load_mono_at(path: Path, sr: int) -> np.ndarray:
     return load_audio(path, sr)
 
@@ -157,7 +171,8 @@ def read_stem_songs(stems_dir: str | Path, ids: list[str] | None = None, max_sec
         truth = next((p for p in (d / "hits.csv", d / "hits.mid", d / "hits.midi") if p.exists()), None)
         pseudo = d / "hits_pseudo.csv"
         if truth is not None:
-            hits = load_hits(truth)
+            off = read_label_offset(d)  # 正解の時刻のずれ（あれば直す）
+            hits = [Hit(h.time + off, h.cls, h.velocity) for h in load_hits(truth)]
             start = read_start_override(d) or 0.0
             dur = sf.info(str(audio)).duration - start
             hits = [Hit(h.time - start, h.cls, h.velocity) for h in hits if h.time >= start]

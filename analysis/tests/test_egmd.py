@@ -94,18 +94,33 @@ def test_augment_and_bleed(tmp_path):
 
 
 def test_train_egmd_and_eval(tmp_path):
+    import json
+
     root = tmp_path / "e-gmd"
     _fake_egmd(root)
+    # 自作の合成音のにじみ（製品に入れるモデルの作り方）と、正解の時刻のずれの一覧
+    bleed = tmp_path / "bleed_synth"
+    tools = Path(__file__).resolve().parents[1]
+    r = subprocess.run([sys.executable, str(tools / "make_bleed_set.py"), str(bleed), "--minutes", "0.5", "--seconds", "10"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    r = subprocess.run([sys.executable, str(tools / "egmd_offsets.py"), str(root), "--workers", "1"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert (root / "label_offsets.csv").exists()
     out = tmp_path / "m.onnx"
-    script = Path(__file__).resolve().parents[1] / "train_transcriber.py"
-    r = subprocess.run([sys.executable, str(script), "--egmd", str(root), "--epochs", "1", "--batch", "2", "--seconds", "3",
+    script = tools / "train_transcriber.py"
+    r = subprocess.run([sys.executable, str(script), "--egmd", str(root), "--bleed-dir", str(bleed), "--epochs", "1", "--batch", "2", "--seconds", "3",
                         "--chunks-per-track", "1", "--workers", "0", "--hidden", "16", "--val-tracks", "1", "--val-seconds", "5",
                         "--max-tracks", "3", "--out", str(out)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert out.exists() and out.with_suffix(".json").exists() and out.with_suffix(".pt").exists()
-    assert "E-GMD: 学習 3 本" in r.stdout
-    ev = Path(__file__).resolve().parents[1] / "eval_egmd.py"
+    assert "E-GMD: 学習 3 本" in r.stdout and "にじみ用の音声 3 本" in r.stdout and "正解の時刻のずれの補正" in r.stdout
+    meta = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert meta["bleed_dir"] == str(bleed) and meta["bleed_files"] == 3 and meta["label_offsets_corrected"] == 0  # 合成の擬似データはずれていない
+    ev = tools / "eval_egmd.py"
     r = subprocess.run([sys.executable, str(ev), str(out), str(root), "--split", "validation", "--seconds", "5", "--check-offset"],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert "M0-1" in r.stdout and "ずれの見積もり" in r.stdout
+    assert "M0-1" in r.stdout and "ずれの見積もり" in r.stdout and "正解の時刻のずれ: " in r.stdout
+    r = subprocess.run([sys.executable, str(ev), str(out), str(root), "--split", "validation", "--seconds", "5", "--no-label-offsets"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and "直さない（--no-label-offsets）" in r.stdout

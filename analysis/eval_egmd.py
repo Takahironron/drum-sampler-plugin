@@ -3,7 +3,11 @@
 
 使い方::
 
-    python eval_egmd.py models/crnn_egmd_v1.onnx D:\\data\\e-gmd-v1.0.0 [--split test] [--max-tracks 60] [--seconds 30] [--check-offset]
+    python eval_egmd.py models/crnn_egmd_v1.onnx D:\\data\\e-gmd-v1.0.0 [--split test] [--max-tracks 60] [--seconds 30] [--no-label-offsets]
+
+E-GMD の正解の MIDI は、ファイルごとに音とずれていることがある（標本 67 本の 7% が 50 ms 以上 = 採点の許容を超える）。
+`egmd_offsets.py` で測った一覧（`label_offsets.csv`）が E-GMD のフォルダにあれば、ずれを直した正解で採点する。
+`--no-label-offsets` で直さない（v5 までの数字はこの状態）。両方を出して比べると、ずれの影響が分かる。
 """
 
 from __future__ import annotations
@@ -17,10 +21,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from drumeval import transcription_scores  # noqa: E402
-from drumeval.egmd import estimate_offset, load_audio, read_index  # noqa: E402
+from drumeval.egmd import estimate_offset, load_audio, read_index, track_hits  # noqa: E402
 from drumeval.features import log_mel, pick_hits  # noqa: E402
 from drumeval.infer import load_meta  # noqa: E402
-from drumeval.labels import M0_CLASSES, load_hits_midi  # noqa: E402
+from drumeval.labels import M0_CLASSES  # noqa: E402
 
 
 def _drop_quiet(ref, est, min_velocity: int, tol: float = 0.05):
@@ -92,7 +96,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-tracks", type=int, default=60)
     ap.add_argument("--seconds", type=float, default=30.0)
     ap.add_argument("--threshold", type=float, default=None)
-    ap.add_argument("--check-offset", action="store_true", help="音声と MIDI のずれの見積もりも出す")
+    ap.add_argument("--check-offset", action="store_true", help="音声と MIDI のずれの見積もりも出す（粗い測り方。正確な一覧は egmd_offsets.py）")
+    ap.add_argument("--no-label-offsets", action="store_true", help="正解の時刻のずれ（label_offsets.csv）を直さずに採点する（比較用）")
     ap.add_argument("--by-kit", action="store_true", help="キットごとの M0-1 も出す（電子系のキットが弱いかを見る）")
     ap.add_argument("--diagnose", action="store_true", help="ハイハットとシンバルの取りこぼし・誤検出の内訳（小さい打か、同時の打か、混同か）を出す")
     ap.add_argument("--sweep", action="store_true", help="しきい値 0.3〜0.8 で種類ごとの F を出す")
@@ -106,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg, classes, thr = load_meta(args.model)
     thr = args.threshold if args.threshold is not None else thr
     sess = ort.InferenceSession(args.model, providers=["CPUExecutionProvider"])
-    tracks = [t for t in read_index(args.egmd) if t.split == args.split]
+    tracks = [t for t in read_index(args.egmd, use_offsets=not args.no_label_offsets) if t.split == args.split]
     rng = np.random.default_rng(args.seed)
     rng.shuffle(tracks)  # type: ignore[arg-type]
     tracks = tracks[: args.max_tracks]
@@ -121,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     diag = {c: {"fn_quiet": 0, "fn_loud": 0, "fn_masked": 0, "fn_free": 0, "fp_other": {}, "fp_none": 0, "n_ref": 0, "n_est": 0} for c in ("hihat", "cymbal", "snare")}
     for tr in tracks:
         x = load_audio(tr.audio, cfg.sr, 0.0, args.seconds)
-        hits_all = [h for h in load_hits_midi(tr.midi) if h.time < x.size / cfg.sr]
+        hits_all = [h for h in track_hits(tr) if h.time < x.size / cfg.sr]  # ずれの一覧があれば、直した時刻
         prob = sess.run(None, {sess.get_inputs()[0].name: log_mel(x, cfg)[None]})[0][0]
         est_all = pick_hits(prob, cfg, classes, thr)
         hits, est = _drop_quiet(hits_all, est_all, args.min_velocity)
@@ -141,6 +146,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.check_offset:
             offsets.append(estimate_offset(x, cfg.sr, hits, cfg))
 
+    n_shifted = sum(1 for t in tracks if abs(t.offset) >= 0.005)
+    print("正解の時刻のずれ: " + ("直さない（--no-label-offsets）" if args.no_label_offsets else
+                           f"{n_shifted} / {len(tracks)} 本を 5 ms 以上直した（label_offsets.csv）" if n_shifted else
+                           "直していない（label_offsets.csv が無い。python analysis/egmd_offsets.py <E-GMD のフォルダ> で作る）"))
     print(f"E-GMD {args.split} 分割 {len(tracks)} 本 × {args.seconds:.0f} 秒、しきい値 {thr}（特徴量: {cfg.n_mels} メル）"
           + (f"、velocity {args.min_velocity} 未満の打を除く" if args.min_velocity > 0 else ""))
     print(f"{'種類':8s} {'P':>6s} {'R':>6s} {'F':>6s}")

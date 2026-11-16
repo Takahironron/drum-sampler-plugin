@@ -8,7 +8,8 @@ HTTP の範囲指定（Range）で、zip の目録と、選んだトラックの
     python analysis/run_eval.py data/egmd_stems --parts nmfd-oracle --out data/results/egmd_sample.md
 
 - `--out` には E-GMD と同じ配置（`e-gmd-v1.0.0.csv` と `drummerN/...`）で置く。`drumeval.egmd.read_index` でそのまま読める。
-- `--stems-out` には `run_eval.py` の形（`<曲ID>/drums.wav` と正解の `hits.mid`）で置く。
+- `--stems-out` には `run_eval.py` の形（`<曲ID>/drums.wav` と正解の `hits.mid`）で置く。正解と音の時刻のずれ（E-GMD の配布物には
+  ファイルごとに −73〜+119 ms のずれがある）を測って `label_offset.txt` に書く。`run_eval.py` はその値を正解の打点に足す。
 - 選び方: 分割（既定 test）、`beat`（フィルでない）、長さ `--min-seconds`〜`--max-seconds`。キットが重ならないように 1 キット 1 本ずつ、
   スタイルも散るように選ぶ（乱数の種で決まる）。`--kits` でキット名の一部を指定できる。
 - 出典の表示: Callender, Hawthorne, Engel (2020) "Improving Perceptual Quality of Drum Transcription with the Expanded Groove MIDI
@@ -233,6 +234,10 @@ def main(argv: list[str] | None = None) -> int:
             shutil.copyfile(out / r["audio_filename"], d / "drums.wav")
             shutil.copyfile(out / r["midi_filename"], d / "hits.mid")
             (d / "start.txt").write_text("0", encoding="utf-8")  # 正解の MIDI と時刻を揃えるため、頭から評価する
+        # E-GMD の正解の MIDI は、ファイルごとに音とずれていることがある。測って label_offset.txt に書く（run_eval.py が使う）
+        from egmd_offsets import run_stems
+
+        run_stems(stems)
     print(f"{len(done)} 本を {out} に置いた（要求 {fp.requests} 回、{fp.bytes_read / 1e6:.0f} MB）。" + (f" run_eval 用: {args.stems_out}" if args.stems_out else ""), file=sys.stderr)
     return 0 if done else 1
 

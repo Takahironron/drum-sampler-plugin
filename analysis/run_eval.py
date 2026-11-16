@@ -42,7 +42,7 @@ from stft_distance import load_mono  # noqa: E402
 
 
 from drumeval.stems import (  # noqa: E402,F401  (find_stem などは drumeval.stems に移した。ここからも使える)
-    AUDIO_EXT, PART_NAMES, detect_drum_start, find_part_stems, find_stem, read_start_override, resolve_start,
+    AUDIO_EXT, PART_NAMES, detect_drum_start, find_part_stems, find_stem, read_label_offset, read_start_override, resolve_start,
 )
 
 
@@ -198,9 +198,10 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
     parts = find_part_stems(song_dir)
     ref: list[Hit] | None = None
     if truth_path:
-        # 正解の時刻はファイルの先頭から。評価の区間（start から）の相対時刻に直す
-        ref = [Hit(h.time - start, h.cls, h.velocity) for h in load_hits(truth_path) if 0.0 <= h.time - start < x.size / sr]
-        row["truth"] = "正解"
+        # 正解の時刻はファイルの先頭から。評価の区間（start から）の相対時刻に直す。label_offset.txt があれば、正解と音のずれも直す
+        label_off = read_label_offset(song_dir)
+        ref = [Hit(h.time + label_off - start, h.cls, h.velocity) for h in load_hits(truth_path) if 0.0 <= h.time + label_off - start < x.size / sr]
+        row["truth"] = "正解" + (f"（時刻を {label_off * 1000:+.0f} ms 直した）" if abs(label_off) >= 0.0005 else "")
     elif all(c in parts for c in M0_CLASSES):
         levels: dict[str, np.ndarray] = {}
         ref = pseudo_truth_from_parts(parts, x.size / sr, sr, start, levels_out=levels)  # シンバル・タムのステムがあればそれも含める

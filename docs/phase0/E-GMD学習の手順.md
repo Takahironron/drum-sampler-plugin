@@ -1,6 +1,6 @@
 # E-GMD で採譜モデルを学習する手順（Windows、RTX 3060 6 GB）
 
-E-GMD（Expanded Groove MIDI Dataset）は Google Magenta が CC BY 4.0 で公開する、電子ドラム（Roland TD-17、43 キット）の演奏 444 時間の音声と MIDI。音声と MIDI は 2 ms 以内に揃っている。出典: https://magenta.tensorflow.org/datasets/e-gmd 、Callender, Hawthorne, Engel (2020) arXiv:2004.00188。ライセンスの整理は `ライセンス一覧.md` #1。
+E-GMD（Expanded Groove MIDI Dataset）は Google Magenta が CC BY 4.0 で公開する、電子ドラム（Roland TD-17、43 キット）の演奏 444 時間の音声と MIDI。**配布物の MIDI と音は、ファイルごとに一定量ずれているものがある**（2026-11-16 に標本 67 本で確認: 10 ms 以上が 34%、30 ms 以上が 15%、50 ms 以上が 7%、範囲は −73〜+119 ms。2.5 節で測って直す）。出典: https://magenta.tensorflow.org/datasets/e-gmd 、Callender, Hawthorne, Engel (2020) arXiv:2004.00188。ライセンスの整理は `ライセンス一覧.md` #1。
 
 ## 1. ダウンロードと展開（初回だけ、数時間）
 
@@ -56,7 +56,45 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 
 最後の行が `True` と `NVIDIA GeForce RTX 3060 Laptop GPU` を出せばよい。`cu126` で入らなければ https://pytorch.org/get-started/locally/ で Windows / pip / CUDA 12.x の行を選んでそのコマンドを使う。NVIDIA のドライバーは最新にしておく。
 
+## 2.5. 正解の時刻のずれを測る（v6 から。初回だけ）
+
+E-GMD の配布物では、正解の MIDI と音が、ファイルごとに一定量ずれているものがある。ずれは 1 本の中では一定で、同じキットでもファイルによって違う。
+ずれたままだと、モデルは数フレームずれたラベルで学習し（学習のラベルは 10 ms 刻み、打点の後 20 ms）、採点（許容 ±50 ms）は正しい検出を誤りと数える。
+`egmd_offsets.py` がファイルごとのずれを測り、E-GMD のフォルダに `label_offsets.csv` を書く。学習（`train_transcriber.py`）と採点（`eval_egmd.py`）は、
+この一覧があれば自動で使う（打点の時刻にずれを足す）。
+
+```
+python analysis\egmd_offsets.py D:\data\e-gmd-v1.0.0 --split test
+python analysis\eval_egmd.py analysis\models\crnn_egmd_v5.onnx D:\data\e-gmd-v1.0.0 --split test --max-tracks 60 --no-label-offsets
+python analysis\eval_egmd.py analysis\models\crnn_egmd_v5.onnx D:\data\e-gmd-v1.0.0 --split test --max-tracks 60
+python analysis\egmd_offsets.py D:\data\e-gmd-v1.0.0
+```
+
+- 1 行目: まず test 分割だけ測る（数分〜十数分の見込み）。最後に、ずれの分布（10／20／30／50 ms 以上の割合）が出る。**この 1 行を貼ってもらえれば記録する。**
+- 2・3 行目: v5 を、直す前の正解（これまでの数字）と直した正解で採点する。**2 つの M0-1 の差が、これまでの採点がずれで損をしていた分。** 両方の出力を貼ってもらえれば記録する。
+- 4 行目: 全部（学習と検証も）を測る。音 1 分あたり 0.2〜0.3 秒 × 444 時間で、4 プロセスなら 30〜40 分 ＋ 読み込みの見込み。途中で止めても、同じコマンドで続きから。`--workers 8` で速くなる。
+- 測り方: 音の立ち上がりの強さ（約 1.5 ms 刻み）と、打点の列の相互相関が最大になるずれ（±250 ms）。`analysis/drumeval/align.py`。山がはっきりしないファイル（sharpness 1.5 未満）は直さない。
+  標本 67 本で、別の測り方（キックとスネアの打点から最も近い音の立ち上がりまでの差の中央値）と 66 本が 6 ms 以内に一致した。
+- 直さずに学習・採点したいとき（比較用）は `--no-label-offsets`。v5 までのモデルと数字は、直していない。
+
 ## 3. 学習
+
+### v6（製品に入れるモデル。2026-11-16 から）
+
+```
+python analysis\make_bleed_set.py data\bleed_synth --minutes 60
+python analysis\train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\bleed_synth --out analysis\models\crnn_egmd_v6.onnx
+```
+
+- v5 との違いは 2 つ: (1) **正解の時刻のずれを直す**（2.5 節の `label_offsets.csv` があれば自動。学習の最初に「正解の時刻のずれの補正: N 本を 5 ms 以上直す」と出る。0 本なら 2.5 節がまだ）、
+  (2) **にじみを自作の合成音にする**（`make_bleed_set.py`。ベース・撥弦・鍵盤・パッド・リード・声の母音と子音を合成する。音声の素材も既存の曲の MIDI も使わない。60 分ぶんで 1 分ほど）。
+  どちらも権利の明確な材料だけなので、**v6 は製品に入れられる**（E-GMD は CC BY 4.0。出典の表示が要る）。モデルの `.json` に、にじみのフォルダと、ずれを直した本数が残る。
+- それ以外の設定（8,000 本、16 エポック、GRU 160 × 2 層、EMA など）は v5 と同じ。7〜10 時間（夜に回す）。
+- 終わったら、E-GMD の test（`eval_egmd.py … crnn_egmd_v6.onnx`）と区分 A（`run_eval.py … --model analysis\models\crnn_egmd_v6.onnx --parts nmfd --render --tag v6`）で v5 と比べる。
+  v5 はにじみに区分 A そのもののステムを使っていたので、区分 A では v5 が有利な条件だった。v6 が区分 A で下がるなら、にじみの材料の差（Slakh などの CC BY の音を足すかは `ライセンス一覧.md` #15）。
+
+### v5 まで（評価用）
+
 
 ```
 python analysis\train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\stems --out analysis\models\crnn_egmd_v5.onnx
