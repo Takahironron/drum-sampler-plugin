@@ -27,6 +27,7 @@ class Segment:
     time: float  # 元の打点（秒）
     audio: np.ndarray  # モノラル
     peak_db: float
+    confidence: float | None = None  # 分離の確からしさ（`nmfd.hit_confidence`。分からなければ None）
 
 
 @dataclass
@@ -37,6 +38,7 @@ class Layer:
     source_times: list[float] = field(default_factory=list)
     peaks_db: list[float] = field(default_factory=list)  # 各音のピーク（音量合わせ用）
     features: list[list[float]] = field(default_factory=list)  # 各音の特徴（近い音を選ぶ用。無ければ空）
+    confidences: list[float | None] = field(default_factory=list)  # 各音の分離の確からしさ（分からなければ空か None）
 
 
 @dataclass
@@ -353,20 +355,46 @@ def _kmeans(x: np.ndarray, k: int, rng: np.random.Generator, iters: int = 30) ->
     return np.asarray(reps)
 
 
+MIN_CONFIDENCE = 0.8  # 代表音の候補にする、分離の確からしさの下限（`confident_segments`）
+
+
+def attach_confidence(segments: list[Segment], hits: list[Hit], confidence: list[float | None]) -> None:
+    """切り出した区間に、元の打の分離の確からしさを付ける（`hits` と `confidence` は同じ順。区間の時刻は元の打点と同じ）。"""
+    by_hit = {(to_coarse(h.cls), h.time): c for h, c in zip(hits, confidence)}
+    for s in segments:
+        s.confidence = by_hit.get((s.cls, s.time))
+
+
+def confident_segments(segs: list[Segment], min_confidence: float = MIN_CONFIDENCE) -> list[Segment]:
+    """同じ種類の区間のうち、分離の確からしさの低いものを外す（代表音の候補）。
+
+    他の音と重なった打（スネアと同時に鳴ったハイハットなど）から切り出した音は、大半が別の太鼓の音になる。StemGMD の本当の
+    パート別録音で測ると、外さない場合、ハイハットの代表音の 31〜33% が「SN 比 3 dB 未満」（ほぼ別の音）で、0.8 で外すと 1〜3% に減る。
+    下限は `min_confidence` と、その種類の中央値の小さい方（どの打も重なっている種類でも、確からしい方の半分は残す）。
+    確からしさの分からない区間（None）は残す。
+    """
+    known = [s.confidence for s in segs if s.confidence is not None]
+    if not known or min_confidence <= 0:
+        return segs
+    threshold = min(min_confidence, float(np.median(known)))
+    return [s for s in segs if s.confidence is None or s.confidence >= threshold]
+
+
 def build_kit_by_features(segments: list[Segment], sr: int, n_per_class: int | dict[str, int] = 12, seed: int = 0,
-                          classes: tuple[str, ...] = COARSE_CLASSES, feature_fn=None) -> Kit:
+                          classes: tuple[str, ...] = COARSE_CLASSES, feature_fn=None, min_confidence: float = MIN_CONFIDENCE) -> Kit:
     """種類ごとに、特徴空間の k-means の代表 `n_per_class` 音でキットを作る。
 
     `feature_fn(audio, sr)` は既定で `segment_features`（音量・減衰・明るさ・帯域の 6 個）。`head_embedding` を渡すと
     先頭 0.25 秒の対数メルで選ぶ。3 層 × 3 音のように音量だけで選ぶのではなく、奏法の違いも代表に残る。
     再生時は各打の特徴に最も近い音を選び、音量を合わせる（`render_kit(..., hit_features=...)`。同じ feature_fn を使うこと）。
+    区間に分離の確からしさが付いていれば（`attach_confidence`）、低いものは代表にしない（`confident_segments`。0 で無効）。
     """
     feature_fn = feature_fn or segment_features
     rng = np.random.default_rng(seed)
     parts: dict[str, list[Layer]] = {}
     feat_norm: dict[str, tuple[list[float], list[float]]] = {}
     for cls in classes:
-        segs = [s for s in segments if s.cls == cls]
+        segs = confident_segments([s for s in segments if s.cls == cls], min_confidence)
         if not segs:
             continue
         feats = np.array([feature_fn(s.audio, sr) for s in segs])
@@ -381,6 +409,7 @@ def build_kit_by_features(segments: list[Segment], sr: int, n_per_class: int | d
             layer.source_times.append(segs[i].time)
             layer.peaks_db.append(float(feats[i, 0]))
             layer.features.append([float(v) for v in feats[i]])
+            layer.confidences.append(segs[i].confidence)
         parts[cls] = [layer]
         feat_norm[cls] = ([float(v) for v in mean], [float(v) for v in std])
     return Kit(sr, parts, feat_norm)
@@ -673,7 +702,7 @@ def save_kit(kit: Kit, out_dir: str | Path) -> None:
                 sf.write(out / name, s.astype(np.float32), kit.sr, subtype="PCM_24")  # 小さい音を持ち上げても粗くならないように 24 bit
                 files.append(name)
             meta["parts"][cls].append({"vel_lo": layer.vel_lo, "vel_hi": layer.vel_hi, "files": files, "source_times": layer.source_times,
-                                       "peaks_db": layer.peaks_db, "features": layer.features})
+                                       "peaks_db": layer.peaks_db, "features": layer.features, "confidence": layer.confidences})
     meta["feat_norm"] = kit.feat_norm
     meta["level_range_db"] = {c: [float(lo), float(hi)] for c, (lo, hi) in kit.level_range.items()}
     meta["lead_sec"] = SAMPLE_LEAD_SEC  # 各音は打点のこの秒数だけ前から始まる（立ち上がりは音の頭からこの位置）
@@ -690,7 +719,8 @@ def load_kit(kit_dir: str | Path) -> Kit:
         parts[cls] = []
         for l in layers:
             layer = Layer(l["vel_lo"], l["vel_hi"], source_times=list(l.get("source_times", [])),
-                          peaks_db=list(l.get("peaks_db", [])), features=list(l.get("features", [])))
+                          peaks_db=list(l.get("peaks_db", [])), features=list(l.get("features", [])),
+                          confidences=list(l.get("confidence", [])))
             for f in l["files"]:
                 a, _ = sf.read(d / f, dtype="float64", always_2d=True)
                 layer.samples.append(a.mean(axis=1))

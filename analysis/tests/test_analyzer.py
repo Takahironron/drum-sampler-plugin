@@ -129,3 +129,23 @@ def test_analyze_stem_cli_with_the_transcription_model(tmp_path):
     assert not (out / "preview_midi.wav").exists()  # --preview を付けなければ書かない
     r = subprocess.run([sys.executable, str(SCRIPT), str(tmp_path / "drums.wav"), str(out)], capture_output=True, text=True)
     assert r.returncode != 0 and "--model" in r.stderr
+
+
+def test_kit_samples_come_from_hits_that_do_not_overlap_other_drums(tmp_path):
+    """スネアと同時に鳴るハイハットからは、代表音を取らない（取り出した音の大半がスネアになる）。"""
+    from tests.test_pipeline import _rock_pattern
+
+    truth = [Hit(h.time, to_coarse(h.cls), h.velocity) for h in _rock_pattern(8)]
+    x = render(truth, sr=SR)
+    a = analyze(x, SR, hits=truth)
+    snare_t = np.array([h.time for h in a.hits if h.cls == "snare"])
+    hat = [(h, c) for h, c in zip(a.hits, a.confidence) if h.cls == "hihat"]
+    assert len(a.confidence) == len(a.hits)
+    under = [c for h, c in hat if np.min(np.abs(snare_t - h.time)) < 0.03]
+    assert len(under) >= 8 and max(under) < 0.8  # スネアと同時のハイハットは確からしさが低い
+    layer = a.kit.parts["hihat"][0]
+    assert layer.samples and all(np.min(np.abs(snare_t - t)) > 0.03 for t in layer.source_times)
+    assert all(c >= 0.8 for c in layer.confidences)
+    meta = save_analysis(a, tmp_path / "out")
+    assert meta["confidence_median"]["kick"] > 0.95 and 0.0 < meta["confidence_median"]["hihat"] <= 1.0
+    assert len(a.hits) == len(truth)  # 重なった打も、打点（MIDI）には残る

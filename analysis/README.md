@@ -24,7 +24,7 @@ pip install -r analysis/requirements-ml.txt
 | `extract_kit.py` | 重ならない打の切り出し → 強さ別の層 → キット（M0-2 の材料） | `python analysis/extract_kit.py ステム.wav 打点.csv 出力先 --render 再現.wav` |
 | `fit_fx.py` | 固定の形のエフェクトチェーンの当てはめ（M0-3） | `python analysis/fit_fx.py 乾いた音.wav 目標.wav --out params.json --render 当てはめ後.wav` |
 | `pack_stems.py` | 分離したステムを受け渡し用に小さくする（モノラル 44.1 kHz FLAC、先頭 90 秒） | `python analysis/pack_stems.py 分離したWAVのフォルダ data/stems --seconds 90` |
-| `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト）。パート別ステム（キック.wav など）があれば疑似正解で F 値の目安を出し、パート別の切り出しも試す。`--model` で ONNX の採譜モデル、`--render` で聞き比べ用 WAV、`--parts nmfd` で自前のパート分け（製品の経路）、`--parts nmfd-oracle` で疑似正解の打点から NMFD（分離の上限）、`--nmfd-no-residual` で残差の成分なし、`--nmfd-legacy` で 2026-11-15 より前の NMFD（比較用）。`--model` の `{id}` は曲 ID に置き換わる（曲ごとの微調整モデル）。表には帯域ごとの差（パートの和・自己再現・方式 C と元の差、dB）と、疑似正解の打の大きさの分布も出る。`--tag v5` で書き出す WAV の名前に印を付け、モデルを替えた結果を並べて残せる。パート別の切り出しをした曲には「MIDI だけで鳴らす」の距離と帯域の差も出る（方式 C のキットを、打の時刻・種類・強さだけで鳴らした音。プラグインで鳴るのはこれ。`rerender_midi.wav`、`hits_model.mid`）。`--parts nmfd` では、そのパートに音の無い打を除き、除いた数と、MIDI にした打点の F 値も出る |
+| `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト）。パート別ステム（キック.wav など）があれば疑似正解で F 値の目安を出し、パート別の切り出しも試す。`--model` で ONNX の採譜モデル、`--render` で聞き比べ用 WAV、`--parts nmfd` で自前のパート分け（製品の経路）、`--parts nmfd-oracle` で疑似正解の打点から NMFD（分離の上限）、`--nmfd-no-residual` で残差の成分なし、`--nmfd-legacy` で 2026-11-15 より前の NMFD（比較用）。`--model` の `{id}` は曲 ID に置き換わる（曲ごとの微調整モデル）。表には帯域ごとの差（パートの和・自己再現・方式 C と元の差、dB）と、疑似正解の打の大きさの分布も出る。`--tag v5` で書き出す WAV の名前に印を付け、モデルを替えた結果を並べて残せる。パート別の切り出しをした曲には「MIDI だけで鳴らす」の距離と帯域の差も出る（方式 C のキットを、打の時刻・種類・強さだけで鳴らした音。プラグインで鳴るのはこれ。`rerender_midi.wav`、`hits_model.mid`）。代表音を 48 音にしたときの距離（`rerender_midi_k48.wav`）と、分離の確からしさ（種類別の中央値）も出る。`--parts nmfd` では、そのパートに音の無い打を除き、除いた数と、MIDI にした打点の F 値も出る |
 | `separate_parts.py` | NMFD でドラムのステムをキック／スネア／ハイハット／シンバルに分ける（計画書 3.3 の (2)） | `python analysis/separate_parts.py ドラム.wav 打点.csv 出力先 --reference-dir パート別ステムのフォルダ` | `python analysis/run_eval.py data/stems --out data/results/2026-11-01.md` |
 | `list_itunes_library.py` | iTunes の書き出し（XML かテキスト）をジャンル別の一覧にする（区分 A の選曲用） | `python analysis/list_itunes_library.py ライブラリ.xml --out docs/phase0/itunes一覧.md` |
 | `make_eval_midi.py` | 区分 B の評価用 MIDI 曲（正解の打点・区間ラベル付き）を生成 | `python analysis/make_eval_midi.py --out analysis/eval_midi` |
@@ -62,7 +62,9 @@ pip install -r analysis/requirements-ml.txt
 
 `analyzer.analyze(x, sr, model=…)` が、ステム 1 本からキットと打点を作る（段階 2 で C++／ONNX に移すときの基準）。`analyze_stem.py` はその CLI。
 
-1. 採譜（ONNX のモデル。`hits=` で打点を渡せばそれを使う）→ 2. NMFD でパート分け → 3. **打点の合わせ直し**（`refine_onsets`: 各打の時刻を、そのパートの音の立ち上がりに ±20 ms の範囲で合わせる。採譜の時刻は約 10 ms 刻み）→ 4. **音の無い打を除く**（`silent_hits`: その種類の大きい打より 40 dB 以上小さい打。採譜の誤検出のうち、そのパートに音が無い時刻のもの）→ 5. 切り出し → 6. 代表音（特徴の k-means、種類ごとに 24 音）→ 7. 強さ。
+1. 採譜（ONNX のモデル。`hits=` で打点を渡せばそれを使う）→ 2. NMFD でパート分け → 3. **打点の合わせ直し**（`refine_onsets`: 各打の時刻を、そのパートの音の立ち上がりに ±20 ms の範囲で合わせる。採譜の時刻は約 10 ms 刻み）→ 4. **音の無い打を除く**（`silent_hits`: その種類の大きい打より 40 dB 以上小さい打。採譜の誤検出のうち、そのパートに音が無い時刻のもの）→ 5. 切り出し → 6. 代表音（特徴の k-means、種類ごとに 24 音。**分離の確からしさ**の低い打からは取らない）→ 7. 強さ。
+
+**分離の確からしさ**（`nmfd.hit_confidence`、0〜1）: 打点から 60 ms の間の、Wiener マスクの値の平均（そのパートの取り分で重み付け）。1 に近いほど、その時刻のその帯域はそのパートの音だけ。小さいほど他の音と重なっていて、取り出した音には他の音が混ざる。StemGMD の本当のパート別録音で、打ごとの SN 比との順位相関は 0.78（キック）〜0.92（ハイハット）。スネアと同時に鳴ったハイハットは SN 比の中央値が +2.4 dB しかなく（単独なら +9.4 dB）、そのまま代表音にすると、キットのハイハットの 31〜33% が「ほぼ別の太鼓の音」になる。0.8（とその種類の中央値の小さい方）未満の打を候補から外すと 1〜3% に減る（`extract.confident_segments`）。重なった打も、打点（MIDI）と強さには残る。計画書の「信頼度表示」（Phase 2）の材料にもなる（`kit.json` の各音の `confidence`、`analysis.json` の `confidence_median`）。
 
 **キットと MIDI の約束**（プラグインの `SampleEngine` と同じ。変えるときは両方を変える）:
 

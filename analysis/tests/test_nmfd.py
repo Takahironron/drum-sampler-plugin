@@ -135,3 +135,30 @@ def test_missed_kicks_do_not_leak_into_the_hihat_part():
     assert p["低"] / sum(p.values()) < 0.05, p  # ハイハットのパートの低域は 5% 未満
     assert np.sum(out["residual"] ** 2) > 0.5 * np.sum(kick**2)  # 取りこぼしたキックは残差へ
     assert snr_db(hat, out["hihat"]) > 6.0
+
+
+def test_hit_confidence_is_low_where_a_louder_drum_overlaps():
+    """分離の確からしさ: 単独のハイハットは 1 に近く、スネアと同時のハイハットは低い（取り出した音にスネアが混ざる）。"""
+    from drumeval.nmfd import config_for, hit_confidence, parts_for_hits
+    from tests.test_pipeline import _rock_pattern
+
+    sr = 22050
+    hits = [Hit(h.time, to_coarse(h.cls), h.velocity) for h in _rock_pattern(8)]
+    x = render(hits, sr=sr)
+    stats: dict = {}
+    separate(x, sr, hits, config_for(sr), parts=parts_for_hits(hits), stats=stats)
+    conf = hit_confidence(stats, hits, sr)
+    assert len(conf) == len(hits) and all(0.0 <= c <= 1.0 for c in conf)
+    snare_t = np.array([h.time for h in hits if h.cls == "snare"])
+    kick_t = np.array([h.time for h in hits if h.cls == "kick"])
+    hats = [(h, c) for h, c in zip(hits, conf) if h.cls == "hihat"]
+    with_snare = [c for h, c in hats if np.min(np.abs(snare_t - h.time)) < 0.03]
+    alone = [c for h, c in hats if np.min(np.abs(snare_t - h.time)) > 0.03 and np.min(np.abs(kick_t - h.time)) > 0.03]
+    assert len(with_snare) >= 8 and len(alone) >= 8
+    assert np.median(alone) > 0.9 and np.median(with_snare) < 0.6
+    assert np.median([c for h, c in zip(hits, conf) if h.cls == "kick"]) > 0.95  # 大きい音は、重なっても自分が主
+    assert hit_confidence(stats, [Hit(1.0, "tom", None)], sr) == [None]  # パートの無い種類
+    # stats を渡しても、分けた音は同じ
+    a = separate(x, sr, hits, config_for(sr), parts=parts_for_hits(hits))
+    b = separate(x, sr, hits, config_for(sr), parts=parts_for_hits(hits), stats={})
+    assert all(np.array_equal(a[k], b[k]) for k in a)

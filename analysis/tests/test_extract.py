@@ -251,3 +251,37 @@ def test_silent_hits_marks_hits_far_below_the_loud_ones():
     assert silent_hits(hits, levels) == [False, False, False, False, True, True, False, False, True]
     assert silent_hits(hits, levels, floor_db=-30.0)[3] is True  # 下限を上げると、小さい打も除く
     assert silent_hits([], []) == []
+
+
+def test_low_confidence_segments_do_not_become_kit_samples(tmp_path):
+    """分離の確からしさの低い打（他の音と重なった打）は、代表音にしない。確からしさはキットと一緒に保存される。"""
+    from drumeval.extract import Segment, attach_confidence, build_kit_by_features, confident_segments, load_kit, save_kit
+
+    sr = 22050
+    rng = np.random.default_rng(0)
+    t = np.arange(int(0.2 * sr)) / sr
+
+    def seg(i: int, conf: float | None) -> Segment:
+        a = rng.standard_normal(t.size) * np.exp(-t / (0.02 + 0.002 * i)) * (0.2 + 0.03 * i)
+        return Segment("hihat", 0.25 * i, a, 20 * np.log10(np.max(np.abs(a))), conf)
+
+    confs = [0.95, 0.4, 0.9, 0.3, 0.85, 0.5, 0.97, 0.2, 0.92, 0.88]
+    segs = [seg(i, c) for i, c in enumerate(confs)]
+    kept = confident_segments(segs)
+    assert [s.confidence for s in kept] == [0.95, 0.9, 0.85, 0.97, 0.92, 0.88]  # 0.8 以上
+    kit = build_kit_by_features(segs, sr, n_per_class=24)
+    assert sorted(kit.parts["hihat"][0].confidences) == sorted(c for c in confs if c >= 0.8)
+    assert sorted(kit.parts["hihat"][0].source_times) == sorted(0.25 * i for i, c in enumerate(confs) if c >= 0.8)
+    assert kit.n_samples("hihat") == 6 and build_kit_by_features(segs, sr, n_per_class=24, min_confidence=0.0).n_samples("hihat") == 10
+    # どの打も重なっている種類では、確からしい方の半分を残す（下限は、0.8 とその種類の中央値の小さい方）
+    low = [seg(i, c) for i, c in enumerate([0.3, 0.5, 0.2, 0.6, 0.4, 0.1])]
+    assert sorted(s.confidence for s in confident_segments(low)) == [0.4, 0.5, 0.6]
+    # 確からしさの分からない区間（分離ツールのパート別ステムから切ったときなど）は、そのまま全部が候補
+    unknown = [seg(i, None) for i in range(5)]
+    assert confident_segments(unknown) == unknown and confident_segments([]) == []
+    # 打の並びから区間に付ける
+    hits = [Hit(s.time, "hihat_closed", None) for s in unknown]
+    attach_confidence(unknown, hits, [0.1, 0.2, 0.3, 0.4, 0.5])
+    assert [s.confidence for s in unknown] == [0.1, 0.2, 0.3, 0.4, 0.5]
+    save_kit(kit, tmp_path / "kit")
+    assert load_kit(tmp_path / "kit").parts["hihat"][0].confidences == kit.parts["hihat"][0].confidences

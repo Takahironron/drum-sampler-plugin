@@ -33,7 +33,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from drumeval import Hit, band_balance_db, load_hits, multi_resolution_stft_distance, transcription_scores  # noqa: E402
 from drumeval.baseline import onsets_from_part, transcribe  # noqa: E402
 from drumeval.extract import (  # noqa: E402
-    build_kit, build_kit_by_features, cut_segments, cut_segments_from_parts, estimate_velocities, head_embedding, hit_segments_from_parts,
+    attach_confidence, build_kit, build_kit_by_features, cut_segments, cut_segments_from_parts, estimate_velocities, head_embedding,
+    hit_segments_from_parts,
     level_range_for, refine_onsets, render_kit, render_midi, segment_features, self_render_from_parts, silent_hits, velocity_for_level,
 )
 from drumeval.labels import M0_CLASSES, save_hits_midi as write_hits_midi, to_coarse  # noqa: E402
@@ -248,12 +249,13 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
     part_audio: dict[str, tuple[np.ndarray, int]] = {}
     ref_v: list[Hit] = []
     nmfd_hits = None
+    nmfd_stats: dict = {}
     if parts_mode == "nmfd" and est:
         nmfd_hits = est  # 製品の経路: モデルの打点
     elif parts_mode == "nmfd-oracle" and ref is not None:
         nmfd_hits = ref  # NMFD の上限: 疑似正解の打点（分離の質だけを見る）
     if nmfd_hits:
-        from drumeval.nmfd import LEGACY, PARTS, config_for, parts_for_hits, separate, snr_db
+        from drumeval.nmfd import LEGACY, PARTS, config_for, hit_confidence, parts_for_hits, separate, snr_db
 
         if nmfd_legacy:  # 2026-11-15 より前の設定（比較用）: 係数が累積する縛り方、短い窓、4 パート
             ncfg = config_for(sr, residual=nmfd_residual, **LEGACY)
@@ -261,7 +263,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
         else:
             ncfg = config_for(sr, residual=nmfd_residual, **(nmfd_options or {}))
             nmfd_parts = parts_for_hits(nmfd_hits)  # タムの打が十分あればタムのパートも作る
-        sep = separate(x, sr, nmfd_hits, ncfg, parts=nmfd_parts)
+        sep = separate(x, sr, nmfd_hits, ncfg, parts=nmfd_parts, stats=nmfd_stats)
         part_audio = {c: (sep[c], sr) for c in nmfd_parts}
         if sl_parts:
             # パート別ステム（分離ツールか、本当のパート）を基準にした SN 比。基準が無音の種類は出さない
@@ -300,6 +302,13 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
                 sc = transcription_scores(ref, ref_v)
                 row["f_midi"] = " ".join(f"{c[:2]}{sc[c].f_measure:.3f}" for c in M0_CLASSES)
         segs_p = cut_segments_from_parts(part_audio, ref_v)
+        if nmfd_stats:
+            # 分離の確からしさ（0〜1）。他の音と重なった打（低い値）からは、方式 C の代表音を取らない（`drumeval.analyzer` と同じ）
+            conf = hit_confidence(nmfd_stats, ref_v, sr)
+            attach_confidence(segs_p, ref_v, conf)
+            row["confidence"] = " ".join(
+                f"{c[:2]}{np.median(v):.2f}" for c in ("kick", "snare", "hihat", "tom", "cymbal")
+                if (v := [cf for h, cf in zip(ref_v, conf) if to_coarse(h.cls) == c and cf is not None]))
         total = np.zeros_like(x)
         for c, (px, psr) in part_audio.items():
             total[: px.size] += px
@@ -350,6 +359,11 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
             row["stft_midi"] = multi_resolution_stft_distance(x, ym)["total"]
             row["bands_midi_db"] = band_balance_db(x, ym, sr)
             row["bands_midi"] = _fmt_bands(row["bands_midi_db"])
+            # 代表音を 48 音に増やしたとき（既定の音の数を決める材料。MIDI は同じ）
+            kit_48 = build_kit_by_features(segs_p, sr, n_per_class=48)
+            kit_48.level_range = dict(kit_f.level_range)
+            ym48 = _match_rms(render_midi(hits_midi, kit_48, duration=x.size / sr), x)
+            row["stft_midi_48"] = multi_resolution_stft_distance(x, ym48)["total"]
             if parts_mode == "nmfd":
                 write_hits_midi(hits_midi, out_path("hits_model.mid"))  # モデルの打点（強さは上の約束。保存したキットと合わせて DAW で鳴らせる）
             elif row.get("truth", "").startswith("疑似"):
@@ -358,8 +372,9 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
                 import soundfile as sf
 
                 sf.write(out_path("rerender_midi.wav"), (ym / (np.max(np.abs(ym)) + 1e-9) * 0.9).astype(np.float32), sr)
+                sf.write(out_path("rerender_midi_k48.wav"), (ym48 / (np.max(np.abs(ym48)) + 1e-9) * 0.9).astype(np.float32), sr)
             # 上限: 全部の切り出し音を代表にし、自分自身だけ除いて最も近い音を選ぶ（特徴による選び方の天井）
-            kit_all = build_kit_by_features(segs_p, sr, n_per_class=0)
+            kit_all = build_kit_by_features(segs_p, sr, n_per_class=0, min_confidence=0.0)
             y_all = _match_rms(render_kit(ref_v, kit_all, duration=x.size / sr, hit_levels_db=levels, hit_features=feats, gain_match=True,
                                           choke=CHOKE_POLICIES[choke], hit_audio=own, align=True, leave_one_out=True), x)
             row["stft_parts_ceiling"] = multi_resolution_stft_distance(x, y_all)["total"]
@@ -445,17 +460,17 @@ def resolve_model_path(model: str | None, song_id: str) -> str | None:
 
 def to_markdown(rows: list[dict], title: str) -> str:
     cols = ("id", "start", "seconds", "est_source", "truth", "parts_mode", "f_kick", "f_snare", "f_hihat", "m0_1", "est_counts", "ref_counts", "pseudo_levels",
-            "dropped", "f_midi",
+            "dropped", "f_midi", "confidence",
             "n_isolated", "layers", "stft_rerender", "n_isolated_parts", "layers_parts", "stft_rerender_parts", "stft_parts_gain_choke",
             "kit_features", "stft_parts_features_all", "stft_parts_features_hihat", "stft_parts_features_none", "stft_parts_ceiling",
-            "stft_parts_embed", "stft_parts_embed_ceiling", "stft_midi", "loss_shares", "stft_self", "stft_parts_sum", "bands_sum", "bands_self", "bands_c", "bands_midi",
+            "stft_parts_embed", "stft_parts_embed_ceiling", "stft_midi", "stft_midi_48", "loss_shares", "stft_self", "stft_parts_sum", "bands_sum", "bands_self", "bands_c", "bands_midi",
             "nmfd_snr", "fx_before", "fx_after", "fx_params")
     heads = ("曲ID", "開始秒", "秒", "推定", "正解の種類", "パートの出どころ", "F kick", "F snare", "F hihat", "M0-1", "推定の打（種類別）", "正解の打（種類別）",
              "疑似正解の打の大きさ（0〜−10／−10〜−20／−20〜−30 dB の数）",
-             "音が無くて除いた打（--parts nmfd）", "F（MIDI にした打点。合わせ直しと除外の後）",
+             "音が無くて除いた打（--parts nmfd）", "F（MIDI にした打点。合わせ直しと除外の後）", "分離の確からしさ（種類別の中央値、0〜1）",
              "重ならない打（混合）", "層/音（混合）", "STFT（混合）", "重ならない打（パート別）", "層/音（パート別 3層×3音）", "STFT（A: 3層×3音）",
              "STFT（B: A＋音量合わせ＋チョーク）", "音の数（C: 特徴で選ぶ）", "STFT（C: チョーク全部）", "STFT（C: ハイハットだけ）", "STFT（C: チョーク無し）",
-             "STFT（上限: 全部を代表・自分以外）", "STFT（D: 埋め込みで選ぶ）", "STFT（D の上限）", "STFT（MIDI だけで鳴らす）",
+             "STFT（上限: 全部を代表・自分以外）", "STFT（D: 埋め込みで選ぶ）", "STFT（D の上限）", "STFT（MIDI だけで鳴らす）", "STFT（MIDI だけ、代表 48 音）",
              "C の損失の内訳（種類を自己再現に置き換えたときの下がり幅）", "STFT（自己再現）", "パートの和 vs 元",
              "帯域の差 dB: パートの和 − 元（残差に落ちた分）", "帯域の差 dB: 自己再現 − 元（音量をそろえた後）", "帯域の差 dB: 方式 C − 元（音量をそろえた後）",
              "帯域の差 dB: MIDI だけで鳴らす − 元（音量をそろえた後）",
@@ -490,6 +505,8 @@ def to_markdown(rows: list[dict], title: str) -> str:
                      f"D の上限 {np.mean([r['stft_parts_embed_ceiling'] for r in rows if 'stft_parts_embed_ceiling' in r]):.3f}")
         dm = [r["stft_midi"] for r in rows if "stft_midi" in r]
         if dm:
+            d48 = [r["stft_midi_48"] for r in rows if "stft_midi_48" in r]
+            lines.append(f"- 代表音を 48 音にして MIDI だけで鳴らしたときの距離の平均: {np.mean(d48):.3f}（WAV は rerender_midi_k48.wav）。")
             lines.append(f"- **MIDI だけで鳴らしたときの距離の平均: {np.mean(dm):.3f}**（{len(dm)} 曲）。方式 C のキットを、打の時刻・種類・強さだけで鳴らす（プラグインと同じ鳴らし方: "
                          "強さ 1〜127 をその種類の打の音量の範囲に対応させ、音量の最も近い代表音を選んで音量を合わせる）。方式 C は打ごとに元の音の特徴で音を選ぶので、"
                          "MIDI には無い情報を使っている。DAW で実際に鳴るのはこちら。WAV は rerender_midi.wav、MIDI は hits_model.mid。")

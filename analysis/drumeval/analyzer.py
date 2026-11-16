@@ -6,7 +6,8 @@ Phase 1 段階 1（2026-11-16 合格）で確かめた製品の経路を、1 つ
     ③ パート分け    打点で縛った NMFD（`nmfd.py`）。タムの打が 4 つ以上あればタムのパートも作る
     （打点の合わせ直し）各打の時刻を、そのパートの音の立ち上がりに合わせ直す
     ④ 一打の切り出し 同じ種類の前後に打の無い打を、次の同じ種類の打の手前まで切り出す
-    ⑤ キット         種類ごとに、特徴（音量・減衰・明るさ・帯域）の k-means の代表 `kit_size` 音
+    ⑤ キット         種類ごとに、特徴（音量・減衰・明るさ・帯域）の k-means の代表 `kit_size` 音。分離の確からしさ
+                     （`nmfd.hit_confidence`）の低い打（他の音と重なった打）からは代表を取らない
     （強さ）         各打の音量を、種類ごとの範囲（`Kit.level_range`）で MIDI の強さ 1〜127 に直す
 
 返り値の `Analysis.hits` と `Analysis.kit` があれば、MIDI だけで元に近い音を鳴らせる（`extract.render_midi`、プラグインの `SampleEngine`）。
@@ -23,11 +24,11 @@ from pathlib import Path
 import numpy as np
 
 from .extract import (
-    Kit, build_kit_by_features, cut_segments_from_parts, hit_segments_from_parts, level_range_for, refine_onsets, render_midi, save_kit,
-    segment_features, silent_hits, velocity_for_level,
+    Kit, attach_confidence, build_kit_by_features, cut_segments_from_parts, hit_segments_from_parts, level_range_for, refine_onsets,
+    render_midi, save_kit, segment_features, silent_hits, velocity_for_level,
 )
 from .labels import COARSE_CLASSES, Hit, save_hits_midi, to_coarse
-from .nmfd import config_for, parts_for_hits, separate
+from .nmfd import config_for, hit_confidence, parts_for_hits, separate
 
 
 @dataclass
@@ -41,6 +42,7 @@ class Analysis:
     timings: dict[str, float] = field(default_factory=dict)  # 段ごとの所要時間（秒）
     model: str = ""
     n_dropped: int = 0  # そのパートに音が無くて除いた打の数
+    confidence: list[float | None] = field(default_factory=list)  # 各打の分離の確からしさ（0〜1）。`hits` と同じ順
 
 
 def analyze(x: np.ndarray, sr: int, model: str | Path | None = None, hits: list[Hit] | None = None, threshold: float | None = None,
@@ -61,7 +63,8 @@ def analyze(x: np.ndarray, sr: int, model: str | Path | None = None, hits: list[
 
     t0 = time.perf_counter()
     part_names = parts_for_hits(hits)
-    sep = separate(x, sr, hits, config_for(sr, **(nmfd_options or {})), parts=part_names) if hits else {}
+    stats: dict = {}
+    sep = separate(x, sr, hits, config_for(sr, **(nmfd_options or {})), parts=part_names, stats=stats) if hits else {}
     part_audio = {c: (sep[c], sr) for c in part_names if c in sep}
     timings["パート分け"] = time.perf_counter() - t0
 
@@ -78,14 +81,16 @@ def analyze(x: np.ndarray, sr: int, model: str | Path | None = None, hits: list[
     if n_dropped:
         hits = [h for h, d in zip(hits, drop) if not d]
         levels = own_levels(hits)
+    confidence = hit_confidence(stats, hits, sr) if hits else []
     segs = cut_segments_from_parts(part_audio, hits)
+    attach_confidence(segs, hits, confidence)  # 他の音と重なった打は、代表音の候補から外れる
     kit = build_kit_by_features(segs, sr, n_per_class=kit_size, feature_fn=segment_features)
     for c in kit.parts:
         kit.level_range[c] = level_range_for([lv for lv, h in zip(levels, hits) if lv is not None and h.cls == c])
     hits = [Hit(h.time, h.cls, velocity_for_level(lv, kit.level_range[h.cls]) if lv is not None and h.cls in kit.level_range else 100)
             for h, lv in zip(hits, levels)]
     timings["切り出しとキット"] = time.perf_counter() - t0
-    return Analysis(sr, x.size / sr, hits, levels, kit, sep, timings, str(model) if model else "", n_dropped)
+    return Analysis(sr, x.size / sr, hits, levels, kit, sep, timings, str(model) if model else "", n_dropped, confidence)
 
 
 def save_analysis(a: Analysis, out_dir: str | Path, offset_sec: float = 0.0) -> dict:
@@ -101,6 +106,9 @@ def save_analysis(a: Analysis, out_dir: str | Path, offset_sec: float = 0.0) -> 
         "sr": a.sr, "seconds": a.duration, "offset_sec": offset_sec, "model": Path(a.model).name if a.model else "",
         "hits": {c: n for c, n in counts.items() if n},
         "dropped_silent_hits": a.n_dropped,
+        # 分離の確からしさ（0〜1）の中央値。低い種類は、他の音と重なっていて、切り出した音や強さが当てにならない
+        "confidence_median": {c: round(float(np.median(v)), 3) for c in COARSE_CLASSES
+                              if (v := [cf for h, cf in zip(a.hits, a.confidence) if h.cls == c and cf is not None])},
         "kit": {c: a.kit.n_samples(c) for c in a.kit.parts},
         "level_range_db": {c: [round(lo, 2), round(hi, 2)] for c, (lo, hi) in a.kit.level_range.items()},
         "timings_sec": {k: round(v, 2) for k, v in a.timings.items()},
