@@ -7,10 +7,10 @@ Python の解析が作ったキット（`kit.json` と代表音の WAV）を読�
 | ファイル | 役目 |
 |---|---|
 | `Source/KitModel.h/.cpp` | キットのデータ（計画書のモジュール `KitModel`）。`kit.json` を読み、WAV をメモリに載せる。種類（kick／snare／hihat／tom／cymbal）→ GM ノート（36／38／42／45／49。周辺のノートも同じ種類に寄せる）。読み込みはメッセージスレッド |
-| `Source/SampleEngine.h/.cpp` | 音を鳴らすエンジン（`Engine` の最小版）。32 ボイスの固定プール、強さ → ピークの目標 dB → 近い音域（最大 4 段）からラウンドロビンで選び、残りの差を音量で合わせる（±12 dB）。ハイハットはチョーク（5 ms で止める）。キットの差し替えはロックの試行で受け渡し、音を鳴らすスレッドではメモリ確保・ロック待ち・ファイル入出力をしない |
+| `Source/SampleEngine.h/.cpp` | 音を鳴らすエンジン（`Engine` の最小版）。32 ボイスの固定プール。**鳴らし方は Python の参照実装（`analysis/drumeval/extract.py` の `render_midi`）と同じ**: 強さ 1〜127 → 目標のピーク dB（`kit.json` の `level_range_db` の範囲で dB に線形）→ ピークが最も近い音を選び、残りの差を音量で合わせる（持ち上げは +12 dB まで）。シンバル以外は、同じ種類の次の打の立ち上がりから 5 ms で前の音を止める（チョーク）。キットの差し替えはロックの試行で受け渡し、音を鳴らすスレッドではメモリ確保・ロック待ち・ファイル入出力をしない |
 | `Source/BuiltInSounds.*` | コード合成の仮の音（`kit.json` が無いときの既定のキット） |
 | `Source/PluginProcessor.*`、`PluginEditor.*` | パラメータ（Gain）、状態の保存（キットのパスを含む）、画面（「kit.json を読む」「仮の音に戻す」、キットの内訳の表示） |
-| `Tools/KitRenderTest.cpp` | DAW 無しでエンジンを通す確認用のコンソールプログラム（`kit.json` → 8 ビートの MIDI → WAV）。CI では Python の `make_demo_kit.py` が作ったキットで毎回通す |
+| `Tools/KitRenderTest.cpp` | DAW 無しでエンジンを通す確認用のコンソールプログラム（`kit.json` → 8 ビートの MIDI → WAV）。`--events 打点.csv`（1 行に「サンプル位置,ノート番号,強さ」）で任意の打点を鳴らし、音量をそろえずに 32 bit float で書く。CI では Python の `make_demo_kit.py` が作ったキットで毎回通し、**同じ打点を Python の `render_midi` で鳴らした音と 1 サンプル単位で比べる**（`analysis/engine_parity.py`。差の最大 5e-7） |
 
 ## ビルド（Windows、Visual Studio 2022）
 
@@ -27,16 +27,21 @@ JUCE は CMake の FetchContent で `8.0.15` を取る。手元の JUCE を使�
 
 ## キットを鳴らす
 
-1. 実ステムからキットを作る（方式 C: 特徴で選んだ代表音 24 音／種類）。
+1. 実ステムからキットと MIDI を作る（解析の参照実装。代表音は種類ごとに 24 音）。
 
    ```
-   python analysis\run_eval.py data\stems --model analysis\models\crnn_egmd_v5.onnx --only a07 --save-kit kit
+   python analysis\analyze_stem.py data\stems\a04\drum.wav data\kits\a04 --model analysis\models\crnn_egmd_v5.onnx --start 71 --seconds 60 --preview
    ```
 
-   `data\stems\a07\kit\kit.json` と `kick\`、`snare\`… の WAV ができる。合成音のデモなら `python analysis\make_demo_kit.py data\kits\demo`。
+   `data\kits\a04\kit.json`、`kick\`、`snare\`… の WAV、`hits.mid`（打点。時刻は元のステムの先頭から、120 BPM）ができる。`--preview` を付けると、
+   このキットを `hits.mid` だけで鳴らした音（`preview_midi.wav`。プラグインで鳴る音の予想）と、同じ区間の元の音（`original_cut.wav`）も書く。
+   `--start` は解析を始める位置（秒。`run_eval.py` の表の「開始秒」か、曲フォルダの `start.txt` の値。a04 は 71）、`--seconds` は解析する長さ（省略すると最後まで）。合成音のデモなら `python analysis\make_demo_kit.py data\kits\demo`。
 
-2. Standalone（か DAW の VST3）で「kit.json を読む」からその `kit.json` を選ぶ。画面に種類ごとの音の数とピークの範囲が出る。
-3. MIDI の 36（キック）、38（スネア）、42（ハイハット）、45（タム）、49（シンバル）で鳴る。強さで音が変わる。
+2. DAW でプラグイン（VST3）を立ち上げ、「kit.json を読む」からその `kit.json` を選ぶ。画面に、種類ごとの音の数と、強さ 1〜127 が対応する音量の範囲が出る。
+3. DAW のテンポを 120 BPM にして、`hits.mid` をプラグインのトラックの先頭（1 小節目の頭）に置く。元のステム（`drum.wav`）を別のトラックの先頭に置けば、
+   切り替えて聞き比べられる。プラグインは 2 ms の遅れをホストに伝えるので、立ち上がりは元のステムと同じ位置に来る。
+4. MIDI の 36（キック）、38（スネア）、42（ハイハット）、45（タム）、49（シンバル）で鳴る。強さ 127 がその曲のその種類の最も大きい打、1 がそこから 30 dB 下
+   （それより小さい打がある曲では、その音量）。
 
 DAW 無しで確かめるなら:
 
@@ -50,7 +55,7 @@ build\KitRenderTest_artefacts\Release\KitRenderTest.exe data\stems\a07\kit\kit.j
 pluginval --strictness-level 5 --validate-in-process --validate build/DrumSamplerPlugin_artefacts/Release/VST3/DrumSamplerPlugin.vst3
 ```
 
-GitHub Actions（`.github/workflows/build.yml`）で Windows は pluginval、Linux は `KitRenderTest` の通し、macOS はコンパイルの確認。Linux では画面のテストを除いた pluginval（`--skip-gui-tests`）が SUCCESS（2026-11-03）。
+GitHub Actions（`.github/workflows/build.yml`）で Windows は pluginval、Linux は `KitRenderTest` の通しと Python の参照実装との一致、macOS はコンパイルの確認。参照実装の側（`analysis/drumeval/extract.py` など）だけを変えたときは `engine-parity.yml` が同じ一致の検査をする。Linux では画面のテストを除いた pluginval（`--skip-gui-tests`）が SUCCESS（2026-11-03、鳴らし方を変えた後の 2026-11-16 も）。
 
 ## ライセンスの注意
 

@@ -17,7 +17,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from drumeval import Hit  # noqa: E402
-from drumeval.extract import build_kit_by_features, cut_segments_from_parts, save_kit  # noqa: E402
+from drumeval.extract import build_kit_by_features, cut_segments_from_parts, level_range_for, save_kit  # noqa: E402
 from drumeval.labels import to_coarse  # noqa: E402
 from drumeval.synth import random_pattern, render  # noqa: E402
 
@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
             parts[cls] = (render(own, sr=args.sr, duration=dur, variation=0.6, seed=args.seed + 1), args.sr)
     segs = cut_segments_from_parts(parts, hits)
     kit = build_kit_by_features(segs, args.sr, n_per_class=16)
+    for cls in kit.parts:  # MIDI の強さ 1〜127 が対応する打の音量の範囲（切り出した全部の打から）
+        kit.level_range[cls] = level_range_for([s.peak_db for s in segs if s.cls == cls])
     save_kit(kit, args.out_dir)
     print("書き出した:", Path(args.out_dir) / "kit.json", " ".join(f"{c}:{kit.n_samples(c)}" for c in kit.parts))
     return 0

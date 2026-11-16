@@ -104,6 +104,12 @@ jobs:
           python analysis/make_demo_kit.py build/demo_kit
       - name: Render the demo kit with the C++ engine
         run: ./build/KitRenderTest_artefacts/${{ env.BUILD_TYPE }}/KitRenderTest build/demo_kit/kit.json build/demo_render.wav 6
+      # 同じキットと打点から、C++ のエンジンと Python の参照実装（render_midi）が同じ音を出すか（1 サンプル単位）
+      - name: Engine parity (C++ SampleEngine vs Python render_midi)
+        run: |
+          python analysis/engine_parity.py make build/demo_kit build/parity
+          ./build/KitRenderTest_artefacts/${{ env.BUILD_TYPE }}/KitRenderTest build/demo_kit/kit.json build/parity/cpp.wav --events build/parity/events.csv
+          python analysis/engine_parity.py check build/demo_kit build/parity
 
   macos:
     name: macOS (compile check)

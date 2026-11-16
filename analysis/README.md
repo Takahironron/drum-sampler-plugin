@@ -24,7 +24,7 @@ pip install -r analysis/requirements-ml.txt
 | `extract_kit.py` | 重ならない打の切り出し → 強さ別の層 → キット（M0-2 の材料） | `python analysis/extract_kit.py ステム.wav 打点.csv 出力先 --render 再現.wav` |
 | `fit_fx.py` | 固定の形のエフェクトチェーンの当てはめ（M0-3） | `python analysis/fit_fx.py 乾いた音.wav 目標.wav --out params.json --render 当てはめ後.wav` |
 | `pack_stems.py` | 分離したステムを受け渡し用に小さくする（モノラル 44.1 kHz FLAC、先頭 90 秒） | `python analysis/pack_stems.py 分離したWAVのフォルダ data/stems --seconds 90` |
-| `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト）。パート別ステム（キック.wav など）があれば疑似正解で F 値の目安を出し、パート別の切り出しも試す。`--model` で ONNX の採譜モデル、`--render` で聞き比べ用 WAV、`--parts nmfd` で自前のパート分け（製品の経路）、`--parts nmfd-oracle` で疑似正解の打点から NMFD（分離の上限）、`--nmfd-no-residual` で残差の成分なし、`--nmfd-legacy` で 2026-11-15 より前の NMFD（比較用）。`--model` の `{id}` は曲 ID に置き換わる（曲ごとの微調整モデル）。表には帯域ごとの差（パートの和・自己再現・方式 C と元の差、dB）と、疑似正解の打の大きさの分布も出る。`--tag v5` で書き出す WAV の名前に印を付け、モデルを替えた結果を並べて残せる |
+| `run_eval.py` | 評価用ステムの集まりに対して3指標をまとめて出す（回帰テスト）。パート別ステム（キック.wav など）があれば疑似正解で F 値の目安を出し、パート別の切り出しも試す。`--model` で ONNX の採譜モデル、`--render` で聞き比べ用 WAV、`--parts nmfd` で自前のパート分け（製品の経路）、`--parts nmfd-oracle` で疑似正解の打点から NMFD（分離の上限）、`--nmfd-no-residual` で残差の成分なし、`--nmfd-legacy` で 2026-11-15 より前の NMFD（比較用）。`--model` の `{id}` は曲 ID に置き換わる（曲ごとの微調整モデル）。表には帯域ごとの差（パートの和・自己再現・方式 C と元の差、dB）と、疑似正解の打の大きさの分布も出る。`--tag v5` で書き出す WAV の名前に印を付け、モデルを替えた結果を並べて残せる。パート別の切り出しをした曲には「MIDI だけで鳴らす」の距離と帯域の差も出る（方式 C のキットを、打の時刻・種類・強さだけで鳴らした音。プラグインで鳴るのはこれ。`rerender_midi.wav`、`hits_model.mid`）。`--parts nmfd` では、そのパートに音の無い打を除き、除いた数と、MIDI にした打点の F 値も出る |
 | `separate_parts.py` | NMFD でドラムのステムをキック／スネア／ハイハット／シンバルに分ける（計画書 3.3 の (2)） | `python analysis/separate_parts.py ドラム.wav 打点.csv 出力先 --reference-dir パート別ステムのフォルダ` | `python analysis/run_eval.py data/stems --out data/results/2026-11-01.md` |
 | `list_itunes_library.py` | iTunes の書き出し（XML かテキスト）をジャンル別の一覧にする（区分 A の選曲用） | `python analysis/list_itunes_library.py ライブラリ.xml --out docs/phase0/itunes一覧.md` |
 | `make_eval_midi.py` | 区分 B の評価用 MIDI 曲（正解の打点・区間ラベル付き）を生成 | `python analysis/make_eval_midi.py --out analysis/eval_midi` |
@@ -32,6 +32,8 @@ pip install -r analysis/requirements-ml.txt
 | `render_midi_synth.py` | song.mid を合成音で WAV にする（DAW で書き出す前の確認用） | `python analysis/render_midi_synth.py analysis/eval_midi/b01_rock/song.mid data/preview/b01_rock.wav` |
 | `fetch_egmd_sample.py` | E-GMD（CC BY 4.0）から少数のトラックだけを取る（zip 全体 90 GB を落とさず、HTTP の範囲指定で必要なファイルだけ）。正解 MIDI 付きの実ドラムの小さな評価セット | `python analysis/fetch_egmd_sample.py --n 14 --out data/egmd_sample --stems-out data/egmd_stems` |
 | `fetch_stemgmd_sample.py` | StemGMD（CC BY 4.0）の評価用セッションから、パート別の単独録音（分離の本当の正解）が付いた曲を取る | `python analysis/fetch_stemgmd_sample.py --n 12 --out data/stemgmd_stems` |
+| `analyze_stem.py` | **解析の参照実装**（計画書のモジュール `Analyzer`）。ドラムのステム 1 本から、キット（`kit.json` と WAV）と打点の MIDI（`hits.mid`）を作る。採譜 → パート分け（NMFD）→ 打点の合わせ直し → 切り出し → 代表音 → 強さ。`--preview` で、そのキットを MIDI だけで鳴らした音（プラグインで鳴る音の予想）も書く | `python analysis/analyze_stem.py ドラム.wav 出力フォルダ --model analysis/models/crnn_egmd_v5.onnx --preview` |
+| `engine_parity.py` | プラグインのエンジン（C++）が Python の参照実装（`render_midi`）と同じ音を出すかを、1 サンプル単位で確かめる（CI の build と engine-parity で毎回） | `python analysis/engine_parity.py make キット 作業フォルダ` → `KitRenderTest キット/kit.json 作業フォルダ/cpp.wav --events 作業フォルダ/events.csv` → `python analysis/engine_parity.py check キット 作業フォルダ` |
 | `make_demo_kit.py` | 合成音からデモ用のキット（kit.json と WAV）を作る（プラグインの確認用） | `python analysis/make_demo_kit.py data/kits/demo` |
 | `train_transcriber.py` | 小さな CRNN を学習し ONNX に書き出す。合成データ（`--steps`）か E-GMD（`--egmd`）。`--finetune-stems` で実ステムの疑似ラベルに合わせる微調整（`--holdout all` で leave-one-out） | `python analysis/train_transcriber.py --egmd D:\data\e-gmd-v1.0.0 --bleed-dir data\stems --epochs 8 --out analysis/models/crnn_egmd_v1.onnx` |
 | `eval_egmd.py` | ONNX の採譜モデルを E-GMD の test 分割で測る（正解は MIDI） | `python analysis/eval_egmd.py analysis/models/crnn_egmd_v1.onnx D:\data\e-gmd-v1.0.0` |
@@ -55,6 +57,21 @@ pip install -r analysis/requirements-ml.txt
 - 打点に強さが無ければ、打点直後 20 ms のピークを種類ごとの分布で 1〜127 に割り当てる（計画書 3.2）。
 - `--render` で同じ打点をキットで鳴らし直し、元のステムとの STFT 距離を出す。聞き比べ（M0-2）はこの2つの WAV で行う。
 - 尾の延長（次の打で切れた分）は Phase 2 の課題で、ここではやらない。
+
+## 解析の参照実装と、キットと MIDI の約束（`drumeval/analyzer.py`、`extract.py`）
+
+`analyzer.analyze(x, sr, model=…)` が、ステム 1 本からキットと打点を作る（段階 2 で C++／ONNX に移すときの基準）。`analyze_stem.py` はその CLI。
+
+1. 採譜（ONNX のモデル。`hits=` で打点を渡せばそれを使う）→ 2. NMFD でパート分け → 3. **打点の合わせ直し**（`refine_onsets`: 各打の時刻を、そのパートの音の立ち上がりに ±20 ms の範囲で合わせる。採譜の時刻は約 10 ms 刻み）→ 4. **音の無い打を除く**（`silent_hits`: その種類の大きい打より 40 dB 以上小さい打。採譜の誤検出のうち、そのパートに音が無い時刻のもの）→ 5. 切り出し → 6. 代表音（特徴の k-means、種類ごとに 24 音）→ 7. 強さ。
+
+**キットと MIDI の約束**（プラグインの `SampleEngine` と同じ。変えるときは両方を変える）:
+
+- **強さ ↔ 音量**: MIDI の強さ 1〜127 は、種類ごとの打のピークの範囲（`kit.json` の `level_range_db`: [下限, 上限]）に dB で線形に対応する（`velocity_for_level`／`level_for_velocity`）。上限はその曲のその種類の最も大きい打、下限は「上限 − 30 dB」と最も小さい打の小さい方（`level_range_for`）。
+- **音の選び方**: その種類の代表音のうち、ピークが目標に最も近い音。残りの差は音量で合わせる（持ち上げるのは +12 dB まで。下げる側は制限しない）。同じ強さなら同じ音（ラウンドロビンはしない。±0.5 dB の幅で回しても距離が 0.12〜0.17 増える）。
+- **位置**: 各音は立ち上がりの 2 ms 前から始まる（`lead_sec`）。`render_midi` は打点の 2 ms 前から置く。プラグインは打点から鳴らし始め、2 ms を遅れとしてホストに伝える（ホストが補正して、立ち上がりが打点に重なる）。
+- **チョーク**: シンバル以外は、同じ種類の次の打の立ち上がりから 5 ms で前の音を止める。
+- `render_midi(hits, kit)` が、この約束で MIDI だけからキットを鳴らす参照実装。`render_kit(..., hit_features=…)`（方式 C）は打ごとに元の音の特徴で音を選ぶので、MIDI に無い情報を使っている。**プラグインで実際に鳴るのは `render_midi` の音。**
+- C++ のエンジンと `render_midi` は 1 サンプル単位で一致する（差の最大 5e-7。`engine_parity.py`）。
 
 ## パート分け（`drumeval/nmfd.py`）
 
@@ -85,7 +102,7 @@ pip install -r analysis/requirements-ml.txt
 cd analysis && python -m pytest -q tests
 ```
 
-合成データで指標の動き（完全一致で 1、許容誤差の外で 0、EQ を変えると距離が増える、など）と、ラベル → 合成音 → 基準値の採譜 → 採点 の通し、切り出し → キット → 再生、エフェクトの当てはめ、学習 → ONNX → ONNX Runtime を確かめる。torch が無ければ学習のテストは飛ばす。
+合成データで指標の動き（完全一致で 1、許容誤差の外で 0、EQ を変えると距離が増える、など）と、ラベル → 合成音 → 基準値の採譜 → 採点 の通し、切り出し → キット → 再生、エフェクトの当てはめ、学習 → ONNX → ONNX Runtime を確かめる。torch が無ければ学習のテストは飛ばす。解析の参照実装（ステム → キットと MIDI → 鳴らし直し）と、エンジンの一致の検査そのものも確かめる。
 
 ## 評価用の MIDI 曲（`eval_midi/`）
 

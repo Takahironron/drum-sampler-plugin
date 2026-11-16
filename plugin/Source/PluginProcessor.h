@@ -46,6 +46,7 @@ public:
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    void updateLatency();
 
     juce::AudioProcessorValueTreeState state;
     std::atomic<float>* gainParam = nullptr;

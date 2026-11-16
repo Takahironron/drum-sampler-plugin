@@ -44,6 +44,9 @@ class Kit:
     sr: int
     parts: dict[str, list[Layer]]  # 種類 → 弱い層から強い層へ
     feat_norm: dict[str, tuple[list[float], list[float]]] = field(default_factory=dict)  # 種類 → (平均, 標準偏差)。特徴の正規化
+    # 種類 → (下限 dB, 上限 dB)。MIDI の強さ 1〜127 が、打のピークのこの範囲に dB で線形に対応する（`velocity_for_level`）。
+    # MIDI だけでキットを鳴らすとき（プラグイン、`render_midi`）に、元の打の音量を再現するための約束
+    level_range: dict[str, tuple[float, float]] = field(default_factory=dict)
 
     def n_samples(self, cls: str) -> int:
         return sum(len(l.samples) for l in self.parts.get(cls, []))
@@ -96,6 +99,93 @@ def max_len_for(cls: str, max_len_sec: float | dict[str, float] | None = None) -
     return float(max_len_sec)
 
 
+SAMPLE_LEAD_SEC = 0.002  # 切り出した音は打点のこの秒数だけ前から始まる（`cut_segments` の lead_sec）
+VELOCITY_RANGE_DB = 30.0  # 強さ 1〜127 に対応させる音量の幅の下限（dB）。最も大きい打からこの幅までは必ず表せる
+
+
+def level_range_for(levels_db: list[float] | np.ndarray) -> tuple[float, float]:
+    """打のピーク（dB）の並びから、強さ 1〜127 に対応させる (下限, 上限) を決める。
+
+    上限は最も大きい打。下限は「上限 − 30 dB」と最も小さい打の小さい方（どの打も強さで表せる。打が全部同じ大きさの
+    打ち込みの曲でも、DAW で強さを下げれば小さく鳴る）。
+    """
+    v = np.asarray([x for x in levels_db if x is not None], dtype=float)
+    if v.size == 0:
+        return (-VELOCITY_RANGE_DB, 0.0)
+    hi = float(v.max())
+    return (float(min(v.min(), hi - VELOCITY_RANGE_DB)), hi)
+
+
+def silent_hits(hits: list[Hit], levels_db: list[float | None], floor_db: float = -40.0) -> list[bool]:
+    """「音の無い打」の印（`hits` と同じ順の真偽）。その種類の大きい打（上位 5%）より `floor_db` 以上小さい打は、鳴らしても聞こえない。
+
+    採譜の誤検出のうち、そのパートに音が無い時刻のもの（パート分けの後で分かる）がこれに当たる。MIDI とキットから除く。
+    """
+    out = [False] * len(hits)
+    by_cls: dict[str, list[int]] = {}
+    for i, h in enumerate(hits):
+        by_cls.setdefault(to_coarse(h.cls), []).append(i)
+    for idx in by_cls.values():
+        vals = [levels_db[i] for i in idx if levels_db[i] is not None]
+        if not vals:
+            for i in idx:
+                out[i] = True
+            continue
+        ref = float(np.percentile(vals, 95))
+        for i in idx:
+            out[i] = levels_db[i] is None or bool(levels_db[i] < ref + floor_db)
+    return out
+
+
+def velocity_for_level(level_db: float, level_range: tuple[float, float]) -> int:
+    """打のピーク（dB）→ MIDI の強さ（1〜127）。範囲の中で dB に線形。"""
+    lo, hi = level_range
+    return int(round(1 + 126 * float(np.clip((level_db - lo) / max(hi - lo, 1e-6), 0.0, 1.0))))
+
+
+def level_for_velocity(velocity: int | None, level_range: tuple[float, float]) -> float:
+    """MIDI の強さ → 目標のピーク（dB）。`velocity_for_level` の逆。強さが無ければ上限。"""
+    lo, hi = level_range
+    if velocity is None:
+        return hi
+    return lo + (hi - lo) * (min(max(int(velocity), 1), 127) - 1) / 126.0
+
+
+def refine_onsets(parts: dict[str, tuple[np.ndarray, int]], hits: list[Hit], search_sec: float = 0.02) -> list[Hit]:
+    """各打の時刻を、そのパートの音の立ち上がりに合わせ直す（採譜の時刻は約 10 ms 刻みで、最大 1 フレームずれる）。
+
+    打点の前後 `search_sec` の中で、「その後 3 ms の大きさ ÷ その前 6 ms の大きさ」が最大になる位置を立ち上がりとする
+    （前の打の余韻が鳴っていても、比なら立ち上がりが分かる）。はっきりした立ち上がりが無い打（比が 1.5 未満）は動かさない。
+    合わせ直すと、切り出した音の頭から立ち上がりまでの長さがそろい、MIDI の時刻でそのまま鳴らしても位置が合う。
+    """
+    out: list[Hit] = []
+    for h in hits:
+        cls = to_coarse(h.cls)
+        if cls not in parts:
+            out.append(h)
+            continue
+        x, sr = parts[cls]
+        n_after, n_before = max(int(0.003 * sr), 1), max(int(0.006 * sr), 1)
+        c = int(round(h.time * sr))
+        lo, hi = max(c - int(search_sec * sr), n_before), min(c + int(search_sec * sr), x.size - n_after)
+        if hi <= lo:
+            out.append(h)
+            continue
+        p = np.asarray(x[lo - n_before : hi + n_after], dtype=np.float64) ** 2
+        cum = np.concatenate([[0.0], np.cumsum(p)])
+        i = np.arange(n_before, n_before + (hi - lo))
+        after = (cum[i + n_after] - cum[i]) / n_after
+        before = (cum[i] - cum[i - n_before]) / n_before
+        floor = 1e-4 * float(after.max()) + 1e-12  # 無音どうしの比で動かないように、その打の大きさに対する小さな床を足す
+        ratio = (after + floor) / (before + floor)
+        k = int(np.argmax(ratio))
+        if ratio[k] < 1.5**2:  # 大きさ（振幅）の比で 1.5 未満
+            out.append(h)
+            continue
+        out.append(Hit((lo + k) / sr, h.cls, h.velocity))
+    return out
+
+
 def select_isolated_hits(hits: list[Hit], pre_sec: float = 0.1, post_sec: float = 0.15) -> list[tuple[Hit, float]]:
     """重ならない打と、その打に使える長さ（次の打までの秒数）を返す。"""
     hs = sorted(hits, key=lambda h: h.time)
@@ -116,7 +206,7 @@ def cut_segments(
     pre_sec: float = 0.1,
     post_sec: float = 0.15,
     max_len_sec: float = 1.5,
-    lead_sec: float = 0.002,
+    lead_sec: float = SAMPLE_LEAD_SEC,
     fade_out_sec: float = 0.01,
 ) -> list[Segment]:
     x = np.asarray(x, dtype=np.float64).ravel()
@@ -464,6 +554,82 @@ def render_kit(
     return out
 
 
+CHOKE_FADE_SEC = 0.005  # チョーク（同じ種類の次の打で前の音を止める）のフェードの長さ
+MAX_BOOST_DB = 12.0  # MIDI で鳴らすとき、選んだ音を持ち上げる上限（小さい音を大きく鳴らすと、雑音やにじみも持ち上がる）。下げる側は制限しない
+
+
+def render_midi(hits: list[Hit], kit: Kit, duration: float | None = None, choke: bool | set[str] = True, neighbours: int = 1,
+                max_boost_db: float = MAX_BOOST_DB, window_db: float | None = None) -> np.ndarray:
+    """MIDI の情報（時刻・種類・強さ）だけでキットを鳴らす。プラグインの `SampleEngine` と同じ鳴らし方（参照実装）。
+
+    プラグイン（`plugin/Source/SampleEngine.cpp`）と 1 サンプル単位で同じ結果になるように書いてある（`engine_parity.py` と CI で確かめる）。
+    鳴らし方を変えるときは両方を変える。
+
+    - 強さ → 目標のピーク（`kit.level_range` の範囲で dB に線形。`level_for_velocity`）。
+    - その種類の音のうち、ピークが目標に最も近い音を使う（同じ近さなら、ピークの小さい方）。`neighbours` を 2 以上にすると、
+      近い順にその数の音を順に使う（同じ強さが続いても同じ音ばかりにならないが、元の再現からは遠ざかる。E-GMD と StemGMD の標本で、
+      ±0.5 dB の幅でも距離が 0.12〜0.17 増えた。音量が近くても奏法の違う音が混ざるため。プラグインは 1）。`window_db` はその幅の上限。
+    - 音量を目標に合わせる。持ち上げるのは `max_boost_db` まで、下げる側は制限しない。
+    - 音は打点の `SAMPLE_LEAD_SEC` 前から置く（切り出した音の立ち上がりが打点に重なる。プラグインは打点から鳴らし始め、
+      この長さを遅れとしてホストに伝える）。
+    - `choke`: 同じ種類の次の打の立ち上がりから、前の音を `CHOKE_FADE_SEC` で止める（True ならシンバル以外）。
+    `render_kit(..., hit_features=...)`（方式 C）は元の音の特徴で打ごとに音を選ぶので、MIDI には無い情報を使っている。
+    """
+    sr = kit.sr
+    last = max((h.time for h in hits), default=0.0)
+    if duration is None:
+        duration = last + 1.5
+    n = int(duration * sr)
+    out = np.zeros(n)
+    order = sorted(range(len(hits)), key=lambda i: hits[i].time)
+    pos = {i: int(round(hits[i].time * sr)) for i in order}  # 打点のサンプル位置（プラグインには、この位置でノートオンが来る）
+    next_same: dict[int, int] = {}
+    last_of_cls: dict[str, int] = {}
+    for i in order:
+        c = to_coarse(hits[i].cls)
+        if c in last_of_cls:
+            next_same[last_of_cls[c]] = pos[i]
+        last_of_cls[c] = i
+    fade = max(int(CHOKE_FADE_SEC * sr), 1)
+    ramp = 1.0 - np.arange(fade) / fade  # 1 から始まり、fade サンプル目で 0（そこで音を止める）
+    choke_set: set[str] = CHOKE_CLASSES if choke is True else (choke if isinstance(choke, set) else set())
+    lead = int(round(SAMPLE_LEAD_SEC * sr))
+    rr: dict[str, int] = {}
+    pools: dict[str, list[tuple[np.ndarray, float]]] = {}
+    for cls in kit.parts:
+        pools[cls] = sorted(((smp, peak) for smp, peak, _ in kit.all_samples(cls)), key=lambda t: t[1])
+    for i in order:
+        h = hits[i]
+        cls = to_coarse(h.cls)
+        pool = pools.get(cls)
+        if not pool:
+            continue
+        peaks = np.array([p for _, p in pool])
+        rng_db = kit.level_range.get(cls) or level_range_for(peaks)
+        target = level_for_velocity(h.velocity, rng_db)
+        near = np.argsort(np.abs(peaks - target), kind="stable")[: max(min(neighbours, len(pool)), 1)]
+        if window_db is not None:  # 最も近い音から window_db 以内の音だけを順に使う
+            dist = np.abs(peaks[near] - target)
+            near = near[dist <= dist[0] + window_db]
+        j = int(near[rr.get(cls, 0) % near.size])
+        rr[cls] = rr.get(cls, 0) + 1
+        s, peak_db = pool[j]
+        seg = s * 10 ** (min(target - peak_db, max_boost_db) / 20)
+        if cls in choke_set and i in next_same:
+            stop = next_same[i] - pos[i] + lead  # 音の頭から数えた、止め始める位置（次の打の立ち上がり）
+            if stop < seg.size:
+                k = min(fade, seg.size - stop)
+                seg[stop : stop + k] *= ramp[:k]
+                seg = seg[: stop + k]
+        start = pos[i] - lead
+        skip = max(-start, 0)
+        start = max(start, 0)
+        length = min(seg.size - skip, n - start)
+        if length > 0:
+            out[start : start + length] += seg[skip : skip + length]
+    return out
+
+
 def estimate_velocities(hits: list[Hit], segments_or_peaks: dict[str, list[tuple[float, float]]] | None, x: np.ndarray, sr: int) -> list[Hit]:
     """打点ごとの立ち上がりの大きさ（打点から 20 ms のピーク）を、種類ごとの分布で 1〜127 に割り当てる（計画書 3.2）。
 
@@ -504,11 +670,13 @@ def save_kit(kit: Kit, out_dir: str | Path) -> None:
             files = []
             for j, s in enumerate(layer.samples):
                 name = f"{cls}/layer{li + 1}_rr{j + 1}.wav"
-                sf.write(out / name, s.astype(np.float32), kit.sr)
+                sf.write(out / name, s.astype(np.float32), kit.sr, subtype="PCM_24")  # 小さい音を持ち上げても粗くならないように 24 bit
                 files.append(name)
             meta["parts"][cls].append({"vel_lo": layer.vel_lo, "vel_hi": layer.vel_hi, "files": files, "source_times": layer.source_times,
                                        "peaks_db": layer.peaks_db, "features": layer.features})
     meta["feat_norm"] = kit.feat_norm
+    meta["level_range_db"] = {c: [float(lo), float(hi)] for c, (lo, hi) in kit.level_range.items()}
+    meta["lead_sec"] = SAMPLE_LEAD_SEC  # 各音は打点のこの秒数だけ前から始まる（立ち上がりは音の頭からこの位置）
     (out / "kit.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -528,4 +696,5 @@ def load_kit(kit_dir: str | Path) -> Kit:
                 layer.samples.append(a.mean(axis=1))
             parts[cls].append(layer)
     feat_norm = {k: (list(v[0]), list(v[1])) for k, v in meta.get("feat_norm", {}).items()}
-    return Kit(int(meta["sr"]), parts, feat_norm)
+    level_range = {k: (float(v[0]), float(v[1])) for k, v in meta.get("level_range_db", {}).items()}
+    return Kit(int(meta["sr"]), parts, feat_norm, level_range)

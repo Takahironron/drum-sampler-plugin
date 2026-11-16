@@ -227,15 +227,8 @@ def update(V: np.ndarray, W: np.ndarray, H: np.ndarray, cfg: NMFDConfig, H_mask:
     return W, H
 
 
-def compute_masks(x: np.ndarray, sr: int, hits: list[Hit], cfg: NMFDConfig | None = None, parts: tuple[str, ...] = PARTS,
-                  constrain_onsets: bool = True) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """因子分解して、パートごとの時間周波数マスクを返す: (複素 STFT X [F, T], マスク [K, F, T]（和は 1）, 名前)。
-
-    マスクは同じ設定の STFT に掛ければ別の信号にも使える（評価で、ドラムとにじみがそれぞれどのパートへ行くかを測る）。
-    `constrain_onsets` が False なら活性を縛らない（打点は初期値にだけ使う）。
-    """
-    cfg = cfg or NMFDConfig()
-    x = np.asarray(x, dtype=np.float64).ravel()
+def _factorize(x: np.ndarray, sr: int, hits: list[Hit], cfg: NMFDConfig, parts: tuple[str, ...], constrain_onsets: bool):
+    """因子分解まで。返り値: (複素 STFT X, ひな形 W, 活性 H, ドラムの成分の数)。"""
     freqs, _, X = _stft(x, cfg)
     freqs = freqs * sr  # scipy は fs=1 のとき正規化周波数を返す
     V = np.abs(X) ** cfg.power + 1e-8
@@ -266,8 +259,26 @@ def compute_masks(x: np.ndarray, sr: int, hits: list[Hit], cfg: NMFDConfig | Non
         W /= W.sum(axis=(1, 2), keepdims=True) + 1e-12
     for _ in range(cfg.iterations):
         W, H = update(V, W, H, cfg, H_mask, n_drums, W_mask)
-    # Wiener マスクで複素 STFT を分ける
-    comps = np.stack([_approx(W[k : k + 1], H[k : k + 1]) ** cfg.mask_exponent for k in range(W.shape[0])])
+    return X, W, H, n_drums
+
+
+def _component_powers(W: np.ndarray, H: np.ndarray, cfg: NMFDConfig):
+    """成分ごとの近似（Wiener マスクの分子）を 1 つずつ返す。全部を同時には持たない。"""
+    for k in range(W.shape[0]):
+        yield _approx(W[k : k + 1], H[k : k + 1]) ** cfg.mask_exponent
+
+
+def compute_masks(x: np.ndarray, sr: int, hits: list[Hit], cfg: NMFDConfig | None = None, parts: tuple[str, ...] = PARTS,
+                  constrain_onsets: bool = True) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """因子分解して、パートごとの時間周波数マスクを返す: (複素 STFT X [F, T], マスク [K, F, T]（和は 1）, 名前)。
+
+    マスクは同じ設定の STFT に掛ければ別の信号にも使える（評価で、ドラムとにじみがそれぞれどのパートへ行くかを測る）。
+    `constrain_onsets` が False なら活性を縛らない（打点は初期値にだけ使う）。マスクを全部並べるので、長い曲では `separate` を使う。
+    """
+    cfg = cfg or NMFDConfig()
+    x = np.asarray(x, dtype=np.float64).ravel()
+    X, W, H, _ = _factorize(x, sr, hits, cfg, parts, constrain_onsets)
+    comps = np.stack(list(_component_powers(W, H, cfg)))
     total = comps.sum(axis=0)
     tiny = total < 1e-20
     masks = comps / np.where(tiny, 1.0, total)[None]
@@ -288,8 +299,20 @@ def separate(x: np.ndarray, sr: int, hits: list[Hit], cfg: NMFDConfig | None = N
     """ドラムのステムをパートに分ける。返り値: 種類 → 波形（元と同じ長さ）。`residual` があれば "residual" も返す。"""
     cfg = cfg or NMFDConfig()
     x = np.asarray(x, dtype=np.float64).ravel()
-    X, masks, names = compute_masks(x, sr, hits, cfg, parts, constrain_onsets)
-    return {name: _istft(X * m, cfg, x.size) for name, m in zip(names, masks)}
+    X, W, H, _ = _factorize(x, sr, hits, cfg, parts, constrain_onsets)
+    # Wiener マスクをパートごとに順に作る（[K, F, T] を一度に持たない。3 分の曲でもメモリは STFT 数枚ぶん）
+    total = np.zeros(X.shape)
+    for comp in _component_powers(W, H, cfg):
+        total += comp
+    tiny = total < 1e-20
+    total[tiny] = 1.0
+    names = list(parts) + (["residual"] if cfg.residual else [])
+    out: dict[str, np.ndarray] = {}
+    for name, comp in zip(names, _component_powers(W, H, cfg)):
+        mask = comp / total
+        mask[tiny] = 1.0 / len(names)  # どの成分も無いところは等分（マスクの和を常に 1 にし、パートと残差の和を元に等しくする）
+        out[name] = _istft(X * mask, cfg, x.size)
+    return out
 
 
 def snr_db(ref: np.ndarray, est: np.ndarray) -> float:

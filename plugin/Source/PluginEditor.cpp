@@ -50,8 +50,8 @@ void DrumSamplerAudioProcessorEditor::refreshKitInfo()
     {
         text << "キット: " << kit->name() << "\n";
         for (const auto& part : kit->parts())
-            text << "  MIDI " << part.midiNote << "  " << part.cls << "  " << (int) part.samples.size() << " 音 ("
-                 << juce::String (part.minPeakDb, 1) << " ～ " << juce::String (part.maxPeakDb, 1) << " dB)"
+            text << "  MIDI " << part.midiNote << "  " << part.cls << "  " << (int) part.samples.size() << " 音  強さ 1～127 = "
+                 << juce::String (part.levelLoDb, 1) << " ～ " << juce::String (part.levelHiDb, 1) << " dB"
                  << (part.choke ? "  チョーク" : "") << "\n";
     }
     kitInfo.setText (text, juce::dontSendNotification);

@@ -1,0 +1,60 @@
+# 鳴らし方の参照実装（Python の render_midi）を変えたときに、C++ のエンジンと同じ音が出るかを確かめる。
+# プラグイン側（plugin/**）を変えたときは build.yml の Linux のジョブが同じ検査をする。
+name: engine-parity
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+    paths:
+      - "analysis/drumeval/extract.py"
+      - "analysis/drumeval/labels.py"
+      - "analysis/drumeval/synth.py"
+      - "analysis/engine_parity.py"
+      - "analysis/make_demo_kit.py"
+      - ".github/workflows/engine-parity.yml"
+  pull_request:
+    paths:
+      - "analysis/drumeval/extract.py"
+      - "analysis/drumeval/labels.py"
+      - "analysis/drumeval/synth.py"
+      - "analysis/engine_parity.py"
+      - "analysis/make_demo_kit.py"
+      - ".github/workflows/engine-parity.yml"
+  workflow_dispatch:
+
+jobs:
+  parity:
+    name: C++ SampleEngine vs Python render_midi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install JUCE dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libfreetype6-dev libfontconfig1-dev libgl1-mesa-dev libcurl4-openssl-dev
+
+      - name: Cache JUCE (FetchContent)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-${{ runner.os }}-${{ hashFiles('plugin/CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S plugin -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build KitRenderTest
+        run: cmake --build build --target KitRenderTest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Engine parity
+        run: |
+          pip install -r analysis/requirements.txt
+          python analysis/make_demo_kit.py build/demo_kit
+          python analysis/engine_parity.py make build/demo_kit build/parity
+          ./build/KitRenderTest_artefacts/Release/KitRenderTest build/demo_kit/kit.json build/parity/cpp.wav --events build/parity/events.csv
+          python analysis/engine_parity.py check build/demo_kit build/parity

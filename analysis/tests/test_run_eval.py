@@ -103,9 +103,49 @@ def test_render_tag_keeps_results_side_by_side(tmp_path):
         assert r.returncode == 0, r.stderr
     names = {p.name for p in song.iterdir()}
     for tag in ("v5", "ft"):
-        assert {f"rerender_parts_{tag}.wav", f"rerender_self_{tag}.wav", f"nmfd_kick_{tag}.wav", f"kit_parts_audition_{tag}.wav"} <= names
+        assert {f"rerender_parts_{tag}.wav", f"rerender_self_{tag}.wav", f"rerender_midi_{tag}.wav", f"nmfd_kick_{tag}.wav",
+                f"kit_parts_audition_{tag}.wav"} <= names
     assert "original_cut.wav" in names and "rerender_parts.wav" not in names
     assert find_stem(song).name == "drum.wav"
     assert {c: p.name for c, p in find_part_stems(song).items()} == {"kick": "キック.wav", "snare": "スネア.wav", "hihat": "ハイハット.wav"}
     r = subprocess.run([sys.executable, str(script), str(tmp_path / "stems"), "--tag", "bad tag"], capture_output=True, text=True)
     assert r.returncode != 0 and "--tag" in r.stderr
+
+
+def test_product_path_writes_midi_only_render_and_matching_midi(tmp_path):
+    """製品の経路（--parts nmfd）: モデルの打点から、キット（--save-kit）と MIDI（hits_model.mid）を書く。
+    その 2 つだけで鳴らした音（rerender_midi.wav）の距離が表に出る。採譜の誤検出のうち音の無い打は MIDI に入らない。"""
+    import pytest
+    import soundfile as sf
+
+    pytest.importorskip("onnxruntime")
+    from drumeval import Hit, load_hits, multi_resolution_stft_distance
+    from drumeval.extract import load_kit, render_midi
+    from drumeval.labels import to_coarse
+
+    sr = 22050
+    truth = _sparse_pattern(8)
+    dur = max(h.time for h in truth) + 1.2
+    song = tmp_path / "stems" / "s01"
+    song.mkdir(parents=True)
+    # 録音と同じく、薄い雑音（−80 dB）を足す。合成の音は打の間が完全な無音で、そこでは距離の対数の項が 16／24 bit の丸めにも反応する
+    x = render(truth, sr=sr, duration=dur) + 1e-4 * np.random.default_rng(0).standard_normal(int(dur * sr))
+    sf.write(song / "drums.wav", x.astype(np.float32), sr)
+    x, _ = sf.read(song / "drums.wav")
+    save_hits_csv(truth, song / "hits.csv")
+    out = tmp_path / "result.md"
+    script = Path(__file__).resolve().parents[1] / "run_eval.py"
+    model = Path(__file__).resolve().parents[1] / "models" / "crnn_synth_v0.onnx"
+    r = subprocess.run([sys.executable, str(script), str(tmp_path / "stems"), "--model", str(model), "--parts", "nmfd", "--render",
+                        "--save-kit", "kit", "--start", "0", "--out", str(out)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    md = out.read_text(encoding="utf-8")
+    assert "STFT（MIDI だけで鳴らす）" in md and "MIDI だけで鳴らしたときの距離の平均" in md and "F（MIDI にした打点" in md
+    assert {"rerender_midi.wav", "hits_model.mid", "kit"} <= {p.name for p in song.iterdir()}
+    # 保存したキットと MIDI だけで、元に近い音が鳴る（プラグインに渡すもの）
+    kit = load_kit(song / "kit")
+    hits = [Hit(h.time, to_coarse(h.cls), h.velocity) for h in load_hits(song / "hits_model.mid")]
+    assert set(kit.level_range) == set(kit.parts) and all(1 <= h.velocity <= 127 for h in hits)
+    y = render_midi(hits, kit, duration=dur)
+    y *= np.sqrt(np.mean(x**2)) / np.sqrt(np.mean(y**2))
+    assert multi_resolution_stft_distance(x, y)["total"] < 0.5  # 表の値（メモリ上）とは、MIDI の時刻の刻み（約 1 ms）の分だけ違う

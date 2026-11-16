@@ -1,6 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <cmath>
+
 DrumSamplerAudioProcessor::DrumSamplerAudioProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       state (*this, nullptr, "STATE", createLayout())
@@ -27,6 +29,15 @@ void DrumSamplerAudioProcessor::useBuiltInKit()
     kitFile = juce::File();
     engine.setKit (model);
     state.state.setProperty ("kitPath", "", nullptr);
+    updateLatency();
+}
+
+void DrumSamplerAudioProcessor::updateLatency()
+{
+    // キットの音は、立ち上がりの少し前（leadSeconds）から始まる。その長さを遅れとして伝えると、ホストが補正して、
+    // 立ち上がりが MIDI の打点（と、並べて置いた元のステム）に重なる
+    const auto model = kitForDisplay;
+    setLatencySamples (model != nullptr ? (int) std::lround (model->leadSeconds() * currentSampleRate) : 0);
 }
 
 bool DrumSamplerAudioProcessor::loadKit (const juce::File& kitJson, juce::String& error)
@@ -39,6 +50,7 @@ bool DrumSamplerAudioProcessor::loadKit (const juce::File& kitJson, juce::String
     kitFile = kitJson;
     engine.setKit (model);
     state.state.setProperty ("kitPath", kitJson.getFullPathName(), nullptr);
+    updateLatency();
     return true;
 }
 
@@ -48,6 +60,7 @@ void DrumSamplerAudioProcessor::prepareToPlay (double sampleRate, int)
     engine.prepare (sampleRate);
     if (kitFile == juce::File() && kitForDisplay != nullptr && kitForDisplay->name() == "Built-in")
         useBuiltInKit(); // 合成の仮の音はサンプリング周波数に合わせて作り直す
+    updateLatency();
 }
 
 bool DrumSamplerAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -74,7 +87,7 @@ void DrumSamplerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
             pos = at;
         }
         if (msg.isNoteOn())
-            engine.noteOn (msg.getNoteNumber(), msg.getFloatVelocity());
+            engine.noteOn (msg.getNoteNumber(), (int) msg.getVelocity());
     }
     if (total > pos)
         engine.render (buffer, pos, total - pos);
