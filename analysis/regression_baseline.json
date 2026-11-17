@@ -1,0 +1,90 @@
+{
+  "説明": "解析の回帰テストの基準（analysis/check_regression.py が読む）。値は、評価セット（docs/phase0/評価用ステム一覧.md の「クラウドでも使える標本」）での曲をまたいだ平均。どの指標も小さいほど良い。「今の値 > value + tolerance」なら悪化とみなす。stft_midi = MIDI だけで鳴らした音と元の距離、stft_self = 自己再現、stft_parts_sum = パートの和と元の距離、part_dist_midi_<種類> = その種類だけを MIDI で鳴らした音と、そのパートの音の距離、midi_offsets_<種類> = 位置が 5 ms 以上ずれる打の割合。良くなったときは python analysis/check_regression.py <要約> <セット> --update で更新してコミットする。",
+  "更新": "2026-11-17（打点の合わせ直しの作り直しと、MIDI 用のキットの後）",
+  "sets": {
+    "stemgmd": {
+      "command": "python analysis/run_eval.py data/stemgmd_stems --parts nmfd-oracle --json data/results/regression_stemgmd.json",
+      "n_songs": 12,
+      "metrics": {
+        "stft_midi": {
+          "value": 1.0106,
+          "tolerance": 0.03
+        },
+        "stft_self": {
+          "value": 0.08,
+          "tolerance": 0.015
+        },
+        "stft_parts_sum": {
+          "value": 0.0277,
+          "tolerance": 0.015
+        },
+        "part_dist_midi_kick": {
+          "value": 0.2786,
+          "tolerance": 0.03
+        },
+        "part_dist_midi_snare": {
+          "value": 0.3742,
+          "tolerance": 0.03
+        },
+        "part_dist_midi_hihat": {
+          "value": 1.5413,
+          "tolerance": 0.05
+        },
+        "midi_offsets_kick": {
+          "value": 0.0068,
+          "tolerance": 0.02
+        },
+        "midi_offsets_snare": {
+          "value": 0.0232,
+          "tolerance": 0.02
+        },
+        "midi_offsets_hihat": {
+          "value": 0.0625,
+          "tolerance": 0.04
+        }
+      }
+    },
+    "egmd": {
+      "command": "python analysis/run_eval.py data/egmd_stems --parts nmfd-oracle --json data/results/regression_egmd.json",
+      "n_songs": 14,
+      "metrics": {
+        "stft_midi": {
+          "value": 0.8478,
+          "tolerance": 0.03
+        },
+        "stft_self": {
+          "value": 0.1245,
+          "tolerance": 0.015
+        },
+        "stft_parts_sum": {
+          "value": 0.0762,
+          "tolerance": 0.015
+        },
+        "part_dist_midi_kick": {
+          "value": 0.2539,
+          "tolerance": 0.03
+        },
+        "part_dist_midi_snare": {
+          "value": 0.327,
+          "tolerance": 0.03
+        },
+        "part_dist_midi_hihat": {
+          "value": 1.1639,
+          "tolerance": 0.05
+        },
+        "midi_offsets_kick": {
+          "value": 0.0183,
+          "tolerance": 0.02
+        },
+        "midi_offsets_snare": {
+          "value": 0.0449,
+          "tolerance": 0.02
+        },
+        "midi_offsets_hihat": {
+          "value": 0.1166,
+          "tolerance": 0.04
+        }
+      }
+    }
+  }
+}

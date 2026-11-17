@@ -396,6 +396,7 @@ def evaluate_song(song_dir: Path, est_csv: Path | None, max_seconds: float, song
                 if lags:
                     off_by[c] = float(np.mean(np.abs(np.array(lags)) > 5.0))
             row["midi_offsets"] = " ".join(f"{c[:2]}{v:.2f}" for c, v in off_by.items())
+            row["midi_offsets_values"] = off_by
             # 代表音を 48 音に増やしたとき（既定の音の数を決める材料。MIDI は同じ）
             kit_48 = build_kit_by_level(segs_p, sr, n_per_class=48)
             kit_48.level_range = dict(kit_m.level_range)
@@ -632,10 +633,37 @@ def to_markdown(rows: list[dict], title: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+SUMMARY_KEYS = ("m0_1", "stft_midi", "stft_midi_48", "stft_midi_km", "stft_parts_features", "stft_self", "stft_parts_sum")
+
+
+def summary(rows: list[dict]) -> dict:
+    """回帰テスト用の要約（`--json`）: 曲をまたいだ平均と、曲ごとの値。
+
+    - `stft_*`、`m0_1`: 表と同じ値。
+    - `part_dist_midi_<種類>`／`part_dist_c_<種類>`／`part_dist_self_<種類>`: 種類ごとの距離（MIDI だけ／方式 C／自己再現）。
+    - `midi_offsets_<種類>`: 位置が 5 ms 以上ずれる打の割合。
+    平均は、その値のある曲だけで取る（`counts` に曲の数）。
+    """
+    per_song: dict[str, dict[str, float]] = {}
+    for r in rows:
+        v: dict[str, float] = {k: float(r[k]) for k in SUMMARY_KEYS if isinstance(r.get(k), (int, float))}
+        for c, (d_midi, d_c, d_self) in (r.get("part_dist_values") or {}).items():
+            v[f"part_dist_midi_{c}"], v[f"part_dist_c_{c}"], v[f"part_dist_self_{c}"] = float(d_midi), float(d_c), float(d_self)
+        for c, frac in (r.get("midi_offsets_values") or {}).items():
+            v[f"midi_offsets_{c}"] = float(frac)
+        per_song[str(r["id"])] = v
+    keys = sorted({k for v in per_song.values() for k in v})
+    return {"n_songs": len(rows), "songs": [str(r["id"]) for r in rows],
+            "means": {k: float(np.mean([v[k] for v in per_song.values() if k in v])) for k in keys},
+            "counts": {k: sum(1 for v in per_song.values() if k in v) for k in keys},
+            "per_song": per_song}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("stems_dir")
     ap.add_argument("--out", default=None, help="Markdown の出力先。省略時は標準出力")
+    ap.add_argument("--json", default=None, metavar="PATH", help="曲をまたいだ平均と曲ごとの値を JSON でも書く（回帰テスト check_regression.py が読む）")
     ap.add_argument("--est-dir", default=None, help="採譜の推定 CSV（<曲ID>.csv）の置き場")
     ap.add_argument("--max-seconds", type=float, default=60.0, help="評価に使う長さ（秒。0 で全部）")
     ap.add_argument("--start", type=float, default=None, help="評価の開始位置（秒）。省略時はドラムが鳴り始める位置を自動で検出。曲ごとに変えるなら曲フォルダに start.txt")
@@ -689,6 +717,12 @@ def main(argv: list[str] | None = None) -> int:
         rows.append(evaluate_song(d, est, args.max_seconds, song_id=song_id, wav=f, model=model, render=args.render, threshold=args.threshold, kit_size=args.kit_size, choke=args.choke, start_sec=args.start,
                                   fit_fx=args.fit_fx, fit_seconds=args.fit_seconds, parts_mode=args.parts,
                                   save_kit_dir=args.save_kit, nmfd_residual=not args.nmfd_no_residual, nmfd_legacy=args.nmfd_legacy, tag=args.tag))
+    if args.json:
+        import json
+
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(json.dumps(summary(rows), ensure_ascii=False, indent=1), encoding="utf-8")
+        print("書き出した:", args.json, file=sys.stderr)
     md = to_markdown(rows, f"評価の結果（{date.today().isoformat()}）")
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
