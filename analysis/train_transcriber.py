@@ -121,8 +121,11 @@ def format_scores(scores: dict, classes: tuple[str, ...]) -> str:
 
 
 def export_onnx(model, cfg: FeatureConfig, classes: tuple[str, ...], out: Path, threshold: float | dict[str, float], meta_extra: dict) -> Path:
-    import onnxruntime as ort
     import torch
+
+    from drumeval.infer import import_onnxruntime
+
+    ort = import_onnxruntime()
 
     out.parent.mkdir(parents=True, exist_ok=True)
     model.eval()

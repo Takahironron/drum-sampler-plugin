@@ -1,0 +1,101 @@
+# プラグイン側の採譜（C++: 間引き → 対数メル → ONNX Runtime → 打点を拾う）が、Python の参照実装と同じ結果を出すかを確かめる。
+# Windows が本線（計画書 3.7）。Linux は開発環境（クラウド）と同じ結果になることの確認。
+name: transcribe-parity
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+    paths:
+      - "plugin/Source/Analysis/**"
+      - "plugin/Tools/TranscribeTest.cpp"
+      - "plugin/CMakeLists.txt"
+      - "analysis/drumeval/features.py"
+      - "analysis/drumeval/infer.py"
+      - "analysis/drumeval/synth.py"
+      - "analysis/transcribe_parity.py"
+      - "analysis/models/**"
+      - ".github/workflows/transcribe-parity.yml"
+  pull_request:
+    paths:
+      - "plugin/Source/Analysis/**"
+      - "plugin/Tools/TranscribeTest.cpp"
+      - "plugin/CMakeLists.txt"
+      - "analysis/drumeval/features.py"
+      - "analysis/drumeval/infer.py"
+      - "analysis/drumeval/synth.py"
+      - "analysis/transcribe_parity.py"
+      - "analysis/models/**"
+      - ".github/workflows/transcribe-parity.yml"
+  workflow_dispatch:
+
+env:
+  # C++ 側（plugin/CMakeLists.txt の ONNXRUNTIME_VERSION）と同じ版にする
+  ONNXRUNTIME_VERSION: "1.31.0"
+
+jobs:
+  linux:
+    name: Linux（C++ の採譜 vs Python）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install JUCE dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libasound2-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libfreetype6-dev libfontconfig1-dev libgl1-mesa-dev libcurl4-openssl-dev
+
+      - name: Cache JUCE and ONNX Runtime (FetchContent)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-ort-${{ runner.os }}-${{ hashFiles('plugin/CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S plugin -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DDRUM_WITH_ONNXRUNTIME=ON
+
+      - name: Build TranscribeTest
+        run: cmake --build build --target TranscribeTest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Transcription parity
+        run: |
+          pip install -r analysis/requirements.txt onnxruntime==${{ env.ONNXRUNTIME_VERSION }}
+          python analysis/transcribe_parity.py run build/transcribe_parity --tool build/TranscribeTest_artefacts/Release/TranscribeTest
+
+  windows:
+    name: Windows（C++ の採譜 vs Python）
+    runs-on: windows-2022
+    env:
+      PYTHONUTF8: "1" # スクリプトの日本語の出力を、コンソールの文字コードに依らず書けるようにする
+    steps:
+      - uses: actions/checkout@v4
+
+      # ONNX Runtime の Windows 版の配布物には 430 MB の .pdb が入っている。キャッシュには入れない（ビルドには要らない）
+      - name: Cache JUCE and ONNX Runtime (FetchContent)
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/_deps
+            !build/_deps/onnxruntime_prebuilt-src/lib/*.pdb
+          key: juce-ort-${{ runner.os }}-${{ hashFiles('plugin/CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S plugin -B build -G "Visual Studio 17 2022" -A x64 -DDRUM_WITH_ONNXRUNTIME=ON
+
+      - name: Build TranscribeTest
+        run: cmake --build build --config Release --target TranscribeTest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Transcription parity
+        shell: pwsh
+        run: |
+          pip install -r analysis/requirements.txt onnxruntime==${{ env.ONNXRUNTIME_VERSION }}
+          python analysis/transcribe_parity.py run build/transcribe_parity --tool build/TranscribeTest_artefacts/Release/TranscribeTest.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

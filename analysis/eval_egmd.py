@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from drumeval import transcription_scores  # noqa: E402
 from drumeval.egmd import estimate_offset, load_audio, read_index, track_hits  # noqa: E402
 from drumeval.features import log_mel, pick_hits  # noqa: E402
-from drumeval.infer import load_meta  # noqa: E402
+from drumeval.infer import import_onnxruntime, load_meta  # noqa: E402
 from drumeval.labels import M0_CLASSES  # noqa: E402
 
 
@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
-    import onnxruntime as ort
+    ort = import_onnxruntime()
 
     cfg, classes, thr = load_meta(args.model)
     thr = args.threshold if args.threshold is not None else thr

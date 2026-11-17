@@ -86,3 +86,66 @@ target_sources(KitRenderTest PRIVATE
 )
 target_compile_definitions(KitRenderTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=0)
 target_link_libraries(KitRenderTest PRIVATE juce::juce_audio_utils PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+
+# 採譜（ONNX Runtime）を通す確認用のコンソールプログラム（WAV → 対数メル → 推論 → 打点）。Python の参照実装と突き合わせる
+# （analysis/transcribe_parity.py）。ONNX Runtime（MIT）は配布物を取ってくる。手元のものを使うなら -DONNXRUNTIME_ROOT=<フォルダ>。
+#   cmake -S plugin -B build -DDRUM_WITH_ONNXRUNTIME=ON ...
+#   cmake --build build --target TranscribeTest
+option(DRUM_WITH_ONNXRUNTIME "採譜（ONNX Runtime）を使うプログラムをビルドする" OFF)
+set(ONNXRUNTIME_VERSION "1.31.0" CACHE STRING "取ってくる ONNX Runtime の版（Python 側の onnxruntime と同じにする）")
+set(ONNXRUNTIME_ROOT "" CACHE PATH "手元の ONNX Runtime（include と lib のあるフォルダ）。空なら配布物を取ってくる")
+
+if(DRUM_WITH_ONNXRUNTIME)
+    if(NOT ONNXRUNTIME_ROOT)
+        if(WIN32)
+            if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|arm64|aarch64")
+                set(_ort_package "onnxruntime-win-arm64-${ONNXRUNTIME_VERSION}.zip")
+            else()
+                set(_ort_package "onnxruntime-win-x64-${ONNXRUNTIME_VERSION}.zip")
+            endif()
+        elseif(APPLE)
+            set(_ort_package "onnxruntime-osx-arm64-${ONNXRUNTIME_VERSION}.tgz") # 1.31.0 の配布物は arm64 だけ
+        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+            set(_ort_package "onnxruntime-linux-aarch64-${ONNXRUNTIME_VERSION}.tgz")
+        else()
+            set(_ort_package "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz")
+        endif()
+        include(FetchContent)
+        FetchContent_Declare(
+            onnxruntime_prebuilt
+            URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${_ort_package}"
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        )
+        FetchContent_MakeAvailable(onnxruntime_prebuilt)
+        set(ONNXRUNTIME_ROOT "${onnxruntime_prebuilt_SOURCE_DIR}" CACHE PATH "" FORCE)
+    endif()
+    message(STATUS "ONNX Runtime: ${ONNXRUNTIME_ROOT}")
+
+    add_library(onnxruntime SHARED IMPORTED GLOBAL)
+    set_target_properties(onnxruntime PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${ONNXRUNTIME_ROOT}/include")
+    if(WIN32)
+        set_target_properties(onnxruntime PROPERTIES
+            IMPORTED_IMPLIB   "${ONNXRUNTIME_ROOT}/lib/onnxruntime.lib"
+            IMPORTED_LOCATION "${ONNXRUNTIME_ROOT}/lib/onnxruntime.dll")
+    elseif(APPLE)
+        set_target_properties(onnxruntime PROPERTIES IMPORTED_LOCATION "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.dylib")
+    else()
+        set_target_properties(onnxruntime PROPERTIES IMPORTED_LOCATION "${ONNXRUNTIME_ROOT}/lib/libonnxruntime.so")
+    endif()
+
+    juce_add_console_app(TranscribeTest PRODUCT_NAME "TranscribeTest")
+    target_sources(TranscribeTest PRIVATE
+        Tools/TranscribeTest.cpp
+        Source/Analysis/Features.cpp
+        Source/Analysis/Features.h
+        Source/Analysis/Transcriber.cpp
+        Source/Analysis/Transcriber.h
+    )
+    target_compile_definitions(TranscribeTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=0)
+    target_link_libraries(TranscribeTest PRIVATE juce::juce_audio_utils onnxruntime PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+    if(WIN32) # 実行ファイルの隣に DLL を置く
+        add_custom_command(TARGET TranscribeTest POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ONNXRUNTIME_ROOT}/lib/onnxruntime.dll" "$<TARGET_FILE_DIR:TranscribeTest>"
+            VERBATIM)
+    endif()
+endif()

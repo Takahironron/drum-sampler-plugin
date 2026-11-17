@@ -48,7 +48,7 @@
 - 解析は Python（PyTorch、librosa など）で試作し、精度を確かめてから C++／ONNX に移す。音源側は最初から JUCE で書く。
 - pluginval で VST3 を自動検査、GitHub Actions で Windows と macOS のビルド、解析の精度は固定の評価用ステム集で毎回測る（回帰テスト）。
 - Takahiro の評価用ステム（区分 A、CD 曲）はクラウドに無い。パート分け・切り出し・再現を変えるときは、先にクラウドで E-GMD と StemGMD の標本（下の表）で前後を測り、それから Takahiro に区分 A での実行と聞き比べを頼む。
-- **プラグインで鳴る音は、MIDI（時刻・種類・強さ）だけでキットを鳴らした音。** 物差しは `run_eval.py` の「MIDI だけで鳴らす」（`rerender_midi.wav`。キットは `extract.build_kit_by_level`）。方式 C（`rerender_parts.wav`）は MIDI に無い情報を使う（打ごとの音色と、位置の合わせ直し。距離は代表音の選びの乱数で、12 曲平均が ±0.03 揺れる）。キックやスネアだけの違いは、混ざった音の距離ではなく表の「種類ごとの距離」で見る。鳴らし方の決まり（キットと MIDI の約束）は `analysis/README.md`。Python の `render_midi` と C++ の `SampleEngine` は 1 サンプル単位で一致させてあり（CI の engine-parity）、変えるときは両方を変える。
+- **プラグインで鳴る音は、MIDI（時刻・種類・強さ）だけでキットを鳴らした音。** 物差しは `run_eval.py` の「MIDI だけで鳴らす」（`rerender_midi.wav`。キットは `extract.build_kit_by_level`）。方式 C（`rerender_parts.wav`）は MIDI に無い情報を使う（打ごとの音色と、位置の合わせ直し。距離は代表音の選びの乱数で、12 曲平均が ±0.03 揺れる）。キックやスネアだけの違いは、混ざった音の距離ではなく表の「種類ごとの距離」で見る。鳴らし方の決まり（キットと MIDI の約束）は `analysis/README.md`。Python の `render_midi` と C++ の `SampleEngine` は 1 サンプル単位で一致させてあり（CI の engine-parity）、変えるときは両方を変える。採譜の入口（間引き・対数メル・打点を拾う）も Python（`drumeval/features.py`、`infer.py`）と C++（`plugin/Source/Analysis/`）で一致させてある（CI の transcribe-parity）。
 - **E-GMD の配布物は、正解の MIDI と音がファイルごとにずれているものがある**（標本の 34% が 10 ms 以上、7% が 50 ms 以上）。学習と採点の前に `analysis/egmd_offsets.py` で測って直す（`label_offsets.csv`、評価用フォルダは `label_offset.txt`）。v5 までのモデルと E-GMD での数字は直していない。
 
 ### 機能の網羅（計画書4章）
@@ -100,6 +100,7 @@
 - **増強に混ぜる音（にじみ）も権利の明確な音だけ**: 製品用のモデル（v6 から）は `analysis/make_bleed_set.py` の合成音を使う。CD 曲のステムを増強や微調整に使ったモデル（v1〜v5、`crnn_ft_*`）は評価用に限る。
 - **特許（R9）**: 録音から材質を推定する米国特許（UNC、US 9,401,684 B2）がある。Phase 2 で推定を入れる前に請求項と権利の状態を確認する。
 - **実時間処理**: オーディオスレッドでメモリの確保、ロック、ファイル入出力、推論をしない。
+- **ONNX Runtime のテレメトリを切る**: 公式の配布物（C++ 版も pip 版も、1.31.0 で確認）は、利用状況を Microsoft に送る機能が既定で有効。Python では `onnxruntime` を直接 import せず `drumeval.infer.import_onnxruntime` を使う。C++ は `Transcriber` が初期化の前に切る（`docs/phase0/ライセンス一覧.md` の 6）。
 - 範囲が膨らんだら、追加の要望は機能 C に入れて次の版で判断する（R6）。
 
 ## 資料の場所
@@ -119,7 +120,8 @@
 | クラウドでも使える実データの評価セット（CC BY 4.0。`data/` に取ってくる。コミットしない） | `analysis/fetch_egmd_sample.py`（E-GMD の 14 本。正解 MIDI、タム・シンバル・電子系のキット）、`analysis/fetch_stemgmd_sample.py`（StemGMD の 12 曲。パート別の単独録音 = 分離の本当の正解）。取った後 `python analysis/run_eval.py data/stemgmd_stems --parts nmfd-oracle`。E-GMD の標本は、正解と音の時刻のずれを `label_offset.txt` に書いてある（`run_eval.py` が直して使う） |
 | 解析の参照実装（ステム 1 本 → キットと MIDI）と、キットと MIDI の約束 | `analysis/analyze_stem.py`、`analysis/drumeval/analyzer.py`、`analysis/README.md` |
 | Python と C++ のエンジンの一致の検査 | `analysis/engine_parity.py`（CI: `build.yml` の Linux、`engine-parity.yml`） |
-| JUCE のプラグイン（kit.json を読んで MIDI で鳴らす） | `plugin/`（`plugin/README.md`） |
+| Python と C++ の採譜の一致の検査 | `analysis/transcribe_parity.py`、`plugin/Tools/TranscribeTest.cpp`（CI: `transcribe-parity.yml`、Windows と Linux） |
+| JUCE のプラグイン（kit.json を読んで MIDI で鳴らす。解析の入口の C++ 版は `plugin/Source/Analysis/`） | `plugin/`（`plugin/README.md`） |
 | 市販ドラム音源の機能比較（25製品×32機能、出典48件、ジャンル別キット） | `docs/research/ドラム音源_機能比較.xlsx` |
 | 物理モデリング系プラグイン46件＋D3 先行事例の比較 | `docs/research/ドラム音源プラグイン比較.xlsx`（生成スクリプトは無い。元データは D1_products.md の表A〜C） |
 | 機能比較 Excel の生成スクリプト（データはスクリプト内） | `scripts/build_feature_matrix.py`（`pip install openpyxl` の後 `python scripts/build_feature_matrix.py`） |

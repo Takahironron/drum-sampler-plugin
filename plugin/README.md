@@ -10,6 +10,9 @@ Python の解析が作ったキット（`kit.json` と代表音の WAV）を読�
 | `Source/SampleEngine.h/.cpp` | 音を鳴らすエンジン（`Engine` の最小版）。32 ボイスの固定プール。**鳴らし方は Python の参照実装（`analysis/drumeval/extract.py` の `render_midi`）と同じ**: 強さ 1〜127 → 目標のピーク dB（`kit.json` の `level_range_db` の範囲で dB に線形）→ ピークが最も近い音を選び、残りの差を音量で合わせる（持ち上げは +12 dB まで）。シンバル以外は、同じ種類の次の打の立ち上がりから 5 ms で前の音を止める（チョーク）。キットの差し替えはロックの試行で受け渡し、音を鳴らすスレッドではメモリ確保・ロック待ち・ファイル入出力をしない |
 | `Source/BuiltInSounds.*` | コード合成の仮の音（`kit.json` が無いときの既定のキット） |
 | `Source/PluginProcessor.*`、`PluginEditor.*` | パラメータ（Gain）、状態の保存（キットのパスを含む）、画面（「kit.json を読む」「仮の音に戻す」、キットの内訳の表示） |
+| `Source/Analysis/Features.h/.cpp` | 解析の入口（計画書のモジュール `Analyzer` の最初の部分）。間引き、対数メル、確率から打点を拾う処理。**Python の参照実装（`analysis/drumeval/features.py`、`infer.py`）と同じ結果を出す**（`scipy.signal.resample_poly` と `stft` の決まりをそのまま移した）。JUCE に依らない |
+| `Source/Analysis/Transcriber.h/.cpp` | 採譜（ステム → 打点）。ONNX のモデルを ONNX Runtime（MIT）で動かす。裏のスレッドで呼ぶ（音を鳴らすスレッドでは呼ばない）。ONNX Runtime の利用状況の送信（テレメトリ）は、初期化の前に切る |
+| `Tools/TranscribeTest.cpp` | DAW 無しで採譜を通す確認用のコンソールプログラム（WAV → 対数メル → 推論 → 打点）。途中の値も書き出し、**Python の `transcribe_onnx` と突き合わせる**（`analysis/transcribe_parity.py`。6 通りのサンプリング周波数で、対数メルと確率の差 0、打点も同じ。Linux で確認）。`-DDRUM_WITH_ONNXRUNTIME=ON` のときだけビルドする |
 | `Tools/KitRenderTest.cpp` | DAW 無しでエンジンを通す確認用のコンソールプログラム（`kit.json` → 8 ビートの MIDI → WAV）。`--events 打点.csv`（1 行に「サンプル位置,ノート番号,強さ」）で任意の打点を鳴らし、音量をそろえずに 32 bit float で書く。CI では Python の `make_demo_kit.py` が作ったキットで毎回通し、**同じ打点を Python の `render_midi` で鳴らした音と 1 サンプル単位で比べる**（`analysis/engine_parity.py`。差の最大 5e-7） |
 
 ## ビルド（Windows、Visual Studio 2022）
@@ -24,6 +27,20 @@ cmake --build build --config Release --target DrumSamplerPlugin_VST3 DrumSampler
 ビルドせずに試すなら、GitHub Actions の `build` の成果物 `DrumSamplerPlugin-windows-standalone`（exe）と `DrumSamplerPlugin-windows-vst3` を使う。
 
 JUCE は CMake の FetchContent で `8.0.15` を取る。手元の JUCE を使うなら `-DJUCE_SOURCE_DIR=<JUCE のフォルダ>`。
+
+### 採譜の確認用のプログラム（ONNX Runtime）
+
+```
+cmake -S plugin -B build -G "Visual Studio 17 2022" -A x64 -DDRUM_WITH_ONNXRUNTIME=ON
+cmake --build build --config Release --target TranscribeTest
+build\TranscribeTest_artefacts\Release\TranscribeTest.exe analysis\models\crnn_egmd_v5.onnx data\stems\a07\drum.wav out_a07
+```
+
+`out_a07\hits.csv` に打点（時刻・種類・確率）、`info.json` に各段の所要時間が出る。モデルの設定は `.onnx` と同じ名前の `.json` から読む。
+ONNX Runtime は公式の配布物（`1.31.0`。Python 側の `onnxruntime` と同じ版にする）を CMake が取ってくる。手元のものを使うなら `-DONNXRUNTIME_ROOT=<include と lib のあるフォルダ>`。
+Windows では `onnxruntime.dll` を実行ファイルの隣に置く（ビルドがコピーする。Windows に元から入っている古い `onnxruntime.dll` を読まないように）。
+3 分のステム（44.1 kHz）で、間引き 0.09 秒、対数メル 0.88 秒、推論 0.12 秒（合成音で学習した小さいモデル。クラウドの Linux、4 コア）。
+プラグイン本体にはまだ入れていない（確認用のプログラムだけ）。
 
 ## キットを鳴らす
 
@@ -55,13 +72,14 @@ build\KitRenderTest_artefacts\Release\KitRenderTest.exe data\stems\a07\kit\kit.j
 pluginval --strictness-level 5 --validate-in-process --validate build/DrumSamplerPlugin_artefacts/Release/VST3/DrumSamplerPlugin.vst3
 ```
 
-GitHub Actions（`.github/workflows/build.yml`）で Windows は pluginval、Linux は `KitRenderTest` の通しと Python の参照実装との一致、macOS はコンパイルの確認。参照実装の側（`analysis/drumeval/extract.py` など）だけを変えたときは `engine-parity.yml` が同じ一致の検査をする。Linux では画面のテストを除いた pluginval（`--skip-gui-tests`）が SUCCESS（2026-11-03、鳴らし方を変えた後の 2026-11-16 も）。
+GitHub Actions（`.github/workflows/build.yml`）で Windows は pluginval、Linux は `KitRenderTest` の通しと Python の参照実装との一致、macOS はコンパイルの確認。採譜の一致は `transcribe-parity.yml`（Windows と Linux で `TranscribeTest` をビルドし、Python と比べる）。参照実装の側（`analysis/drumeval/extract.py` など）だけを変えたときは `engine-parity.yml` が同じ一致の検査をする。Linux では画面のテストを除いた pluginval（`--skip-gui-tests`）が SUCCESS（2026-11-03、鳴らし方を変えた後の 2026-11-16 も）。
 
 ## ライセンスの注意
 
 - JUCE は AGPLv3 と商用ライセンスの二本立て。JUCE 8 の Starter（年 $20,000 まで）はスプラッシュ画面不要。販売前の条件は `docs/phase0/ライセンス一覧.md`。
 - VST3 SDK は JUCE に同梱。JUCE 8.0.15 の同梱版は 3.8.0 で MIT。VST の名称・ロゴを使うなら Steinberg の商標ガイドラインに従う。
+- ONNX Runtime は MIT。**公式の配布物は、利用状況を Microsoft に送る機能（テレメトリ）が既定で有効**（1.31.0 で確認）。このリポジトリでは初期化の前に切っている。製品では、テレメトリ無しで自前ビルドするかを販売前に決める（`docs/phase0/ライセンス一覧.md` の 6）。
 
 ## 次の段階
 
-解析（対数メル、CRNN の推論、NMFD、切り出し、代表音の選択）を C++／ONNX Runtime に移す（`docs/plan/Phase1作業順.md`）。
+解析の残り（NMFD、打点の合わせ直し、切り出し、キット）を C++ に移し、裏のスレッドでプラグイン本体から呼ぶ（`docs/plan/Phase1作業順.md` の段階 2）。対数メルと CRNN の推論は移した（上の `Source/Analysis`）。
