@@ -234,11 +234,6 @@ def train_egmd(args) -> int:
     device = pick_device(args.device)
 
     tracks = read_index(args.egmd, use_offsets=not args.no_label_offsets)
-    n_shifted = sum(1 for t in tracks if abs(t.offset) >= 0.005)
-    # E-GMD の正解の MIDI は、ファイルごとに音とずれていることがある（egmd_offsets.py が測って label_offsets.csv に書く）
-    print(f"正解の時刻のずれの補正: {'しない（--no-label-offsets）' if args.no_label_offsets else f'{n_shifted} 本を 5 ms 以上直す（label_offsets.csv）'}"
-          + ("" if n_shifted or args.no_label_offsets else "。label_offsets.csv が無いか空。先に python analysis/egmd_offsets.py <E-GMD のフォルダ> を走らせる"),
-          flush=True)
     train = [t for t in tracks if t.split == "train"]
     val = [t for t in tracks if t.split == "validation"] or [t for t in tracks if t.split == "test"]
     if not train:
@@ -249,6 +244,23 @@ def train_egmd(args) -> int:
         train = train[: args.max_tracks]
     rng.shuffle(val)  # type: ignore[arg-type]
     val = val[: args.val_tracks]
+    # E-GMD の正解の MIDI は、ファイルごとに音とずれていることがある（egmd_offsets.py が測って label_offsets.csv に書く）。
+    # 学習と検証に使うトラックを全部測ってあることを確かめる。一覧が途中まで（例: test 分割だけ）だと、測っていないトラックは
+    # ずれたままのラベルで学習してしまう（一晩かかる学習なので、始める前に止める）
+    n_shifted = sum(1 for t in train + val if abs(t.offset) >= 0.005)
+    if args.no_label_offsets:
+        print("正解の時刻のずれの補正: しない（--no-label-offsets）", flush=True)
+    else:
+        from drumeval.egmd import find_index_csv, read_offsets
+
+        measured = read_offsets(find_index_csv(args.egmd).parent)
+        missing = sum(1 for t in train + val if t.key not in measured)
+        if missing:
+            print(f"学習と検証に使う {len(train) + len(val)} 本のうち {missing} 本は、正解の時刻のずれをまだ測っていない（label_offsets.csv に無い）。\n"
+                  "先に python analysis/egmd_offsets.py <E-GMD のフォルダ> を最後まで走らせる（途中まで測ってあれば、続きから測る）。\n"
+                  "直さずに学習するなら --no-label-offsets を付ける（v5 まではこの状態）。", file=sys.stderr)
+            return 1
+        print(f"正解の時刻のずれの補正: 学習と検証の {len(train) + len(val)} 本のうち {n_shifted} 本を 5 ms 以上直す（label_offsets.csv）", flush=True)
     bleed = collect_bleed_files(args.bleed_dir) if args.bleed_dir else []
     kits = sorted({t.kit for t in train})
     print(f"E-GMD: 学習 {len(train)} 本（キット {len(kits)} 種）、検証 {len(val)} 本、にじみ用の音声 {len(bleed)} 本、device={device}", flush=True)

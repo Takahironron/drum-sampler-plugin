@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
 from pathlib import Path
 
@@ -31,6 +32,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from drumeval.align import MIN_SHARPNESS, label_offset  # noqa: E402
+
+SEARCH_MS = 250.0  # `label_offset` がずれを探す範囲（±）。`max_lag_sec` の既定と同じ
 
 SR = 22050  # ずれを測るときの sr（半分にしても結果の差は 0.6 ms 以内）
 
@@ -60,9 +63,45 @@ def summarize(offsets_ms: list[float], sharpness: list[float]) -> str:
     if v.size == 0:
         return "測れたトラックが無い"
     weak = sum(1 for s in sharpness if s < MIN_SHARPNESS)
+    signed = np.asarray([o for o, s in zip(offsets_ms, sharpness) if s >= MIN_SHARPNESS])
+    big = signed[np.abs(signed) >= 10]
+    edge = int(np.sum(v >= SEARCH_MS - 10))
     return (f"{v.size} 本: ずれの絶対値の中央 {np.median(v):.1f} ms、10 ms 以上 {np.mean(v >= 10) * 100:.0f}%、20 ms 以上 {np.mean(v >= 20) * 100:.0f}%、"
             f"30 ms 以上 {np.mean(v >= 30) * 100:.0f}%、50 ms 以上 {np.mean(v >= 50) * 100:.0f}%、最大 {v.max():.0f} ms"
-            + (f"。山がはっきりせず使わないもの {weak} 本" if weak else ""))
+            + (f"。山がはっきりせず使わないもの {weak} 本" if weak else "")
+            + (f"\n10 ms 以上のうち、音が遅いもの（正）{np.mean(big > 0) * 100:.0f}%、早いもの（負）{np.mean(big < 0) * 100:.0f}%。100 ms 以上 {int(np.sum(v >= 100))} 本、"
+               f"探す範囲（±{SEARCH_MS:.0f} ms）の端から 10 ms 以内 {edge} 本" + ("（本当のずれは範囲の外かもしれない）" if edge else "") if big.size else ""))
+
+
+def sequence_of(key: str) -> str:
+    """E-GMD の midi_filename から、演奏（元の MIDI。キット違いの録音で共通）の名前を取る: 末尾の「_キット番号」を外す。"""
+    m = re.match(r"^(.*)_(\d+)\.midi?$", key)
+    return m.group(1) if m else key
+
+
+def structure(rows: list[tuple[str, str, float]]) -> list[str]:
+    """ずれが、演奏（元の MIDI）とキットのどちらで決まっているかの要約。`rows` は (演奏, キット, ずれ ms)。
+
+    組（同じ演奏、または同じキット。3 本以上あるもの）で分けたときに、ずれのばらつき（平均からの差の二乗和）のうち
+    組の平均で説明できる割合と、組の中での散らばり（組の中央値からの差の絶対値の中央値。組をまたいだ中央値）を出す。
+    """
+    lines: list[str] = []
+    if len(rows) < 30:
+        return lines
+    for label, idx in (("演奏（元の MIDI。キット違いの録音で共通）", 0), ("キット", 1)):
+        groups: dict[str, list[float]] = {}
+        for r in rows:
+            groups.setdefault(r[idx], []).append(r[2])
+        big = [np.asarray(v) for v in groups.values() if len(v) >= 3]
+        if len(big) < 2:
+            continue
+        inside = np.concatenate(big)
+        total = float(np.sum((inside - inside.mean()) ** 2)) + 1e-12
+        within = float(sum(np.sum((v - v.mean()) ** 2) for v in big))
+        spread = float(np.median([np.median(np.abs(v - np.median(v))) for v in big]))
+        lines.append(f"{label}で分けると、ずれのばらつきの {100.0 * (1.0 - within / total):.0f}% を説明する（{len(big)} 組、{inside.size} 本）。"
+                     f"組の中での散らばり {spread:.1f} ms")
+    return lines
 
 
 def run_dataset(root: Path, workers: int, split: str, max_tracks: int) -> int:
@@ -97,6 +136,8 @@ def run_dataset(root: Path, workers: int, split: str, max_tracks: int) -> int:
     allv = read_offsets(base)
     keys = [t.key for t in tracks if t.key in allv]
     print(summarize([allv[k][0] * 1000 for k in keys], [allv[k][1] for k in keys]))
+    for line in structure([(sequence_of(t.key), t.kit or "?", allv[t.key][0] * 1000) for t in tracks if t.key in allv and allv[t.key][1] >= MIN_SHARPNESS]):
+        print(line)
     return 0
 
 

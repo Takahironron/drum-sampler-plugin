@@ -4,10 +4,18 @@
 使い方::
 
     python eval_egmd.py models/crnn_egmd_v1.onnx D:\\data\\e-gmd-v1.0.0 [--split test] [--max-tracks 60] [--seconds 30] [--no-label-offsets]
+                        [--by-kit] [--worst 10] [--diagnose] [--sweep] [--min-velocity 40]
 
-E-GMD の正解の MIDI は、ファイルごとに音とずれていることがある（標本 67 本の 7% が 50 ms 以上 = 採点の許容を超える）。
+E-GMD の正解の MIDI は、ファイルごとに音とずれていることがある（test 分割の 9% が 50 ms 以上 = 採点の許容を超える）。
 `egmd_offsets.py` で測った一覧（`label_offsets.csv`）が E-GMD のフォルダにあれば、ずれを直した正解で採点する。
-`--no-label-offsets` で直さない（v5 までの数字はこの状態）。両方を出して比べると、ずれの影響が分かる。
+`--no-label-offsets` で直さない（v5 までの数字はこの状態）。両方を出して比べると、ずれの影響が分かる
+（v5: 直さない正解で M0-1 0.773、直した正解で 0.819）。
+
+出力:
+- 種類ごとの P／R／F（曲ごとの値の平均。正解にも推定にも打の無い曲は 1 と数えるので、タムやシンバルは高く出る）と M0-1。
+- 打をまとめた値（全部の曲の打を足して数える）と、正解の打の数、打のある曲の数。
+- 正解のずれが 10 ms 以上の曲と 10 ms 未満の曲の M0-1（直した後も「10 ms 以上」の側だけ低ければ、直し方が合っていない疑い）。
+- `--worst N`: M0-1 の低い曲を N 本、ずれ・確かさ・キットと一緒に。`--by-kit`: キットごとの M0-1。
 """
 
 from __future__ import annotations
@@ -21,7 +29,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from drumeval import transcription_scores  # noqa: E402
-from drumeval.egmd import estimate_offset, load_audio, read_index, track_hits  # noqa: E402
+from drumeval.align import MIN_SHARPNESS  # noqa: E402
+from drumeval.egmd import estimate_offset, find_index_csv, load_audio, read_index, read_offsets, track_hits  # noqa: E402
 from drumeval.features import log_mel, pick_hits  # noqa: E402
 from drumeval.infer import import_onnxruntime, load_meta  # noqa: E402
 from drumeval.labels import M0_CLASSES  # noqa: E402
@@ -99,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check-offset", action="store_true", help="音声と MIDI のずれの見積もりも出す（粗い測り方。正確な一覧は egmd_offsets.py）")
     ap.add_argument("--no-label-offsets", action="store_true", help="正解の時刻のずれ（label_offsets.csv）を直さずに採点する（比較用）")
     ap.add_argument("--by-kit", action="store_true", help="キットごとの M0-1 も出す（電子系のキットが弱いかを見る）")
+    ap.add_argument("--worst", type=int, default=0, metavar="N", help="M0-1 の低い曲を N 本、ずれ・確かさ・キットと一緒に出す（ずれの直し方が合っていない曲を探す）")
     ap.add_argument("--diagnose", action="store_true", help="ハイハットとシンバルの取りこぼし・誤検出の内訳（小さい打か、同時の打か、混同か）を出す")
     ap.add_argument("--sweep", action="store_true", help="しきい値 0.3〜0.8 で種類ごとの F を出す")
     ap.add_argument("--min-velocity", type=int, default=0, help="この velocity 未満の正解の打を評価から外す（例: 40。ゴーストノートを除いた F 値）。"
@@ -119,7 +129,12 @@ def main(argv: list[str] | None = None) -> int:
         print("トラックが無い", file=sys.stderr)
         return 1
 
+    # ずれの一覧は、採点に使わないとき（--no-label-offsets）も読む（ずれの大きかった曲と小さかった曲に分けて見るため）
+    measured = read_offsets(find_index_csv(args.egmd).parent)
     per_class = {c: {"p": [], "r": [], "f": []} for c in classes}
+    pooled = {c: {"ref": 0, "est": 0, "hit": 0, "tracks": 0} for c in classes}  # 全部の曲の打を足した数（hit は対応の付いた打）
+    by_offset: dict[str, list[float]] = {"shifted": [], "aligned": []}
+    per_track: list[tuple[float, str]] = []
     offsets = []
     by_kit: dict[str, list[float]] = {}
     sweep: dict[float, dict[str, list[float]]] = {t: {c: [] for c in classes} for t in (0.3, 0.4, 0.5, 0.6, 0.7, 0.8)}
@@ -142,7 +157,17 @@ def main(argv: list[str] | None = None) -> int:
             per_class[c]["p"].append(s[c].precision)
             per_class[c]["r"].append(s[c].recall)
             per_class[c]["f"].append(s[c].f_measure)
-        by_kit.setdefault(tr.kit or "?", []).append(float(np.mean([s[c].f_measure for c in M0_CLASSES if c in s])))
+            pooled[c]["ref"] += s[c].n_ref
+            pooled[c]["est"] += s[c].n_est
+            pooled[c]["tracks"] += int(s[c].n_ref > 0)
+            if s[c].n_ref and s[c].n_est:
+                pooled[c]["hit"] += int(round(s[c].recall * s[c].n_ref))
+        m0_track = float(np.mean([s[c].f_measure for c in M0_CLASSES if c in s]))
+        by_kit.setdefault(tr.kit or "?", []).append(m0_track)
+        off_ms, sharp = (measured[tr.key][0] * 1000.0, measured[tr.key][1]) if tr.key in measured else (None, 0.0)
+        if off_ms is not None and sharp >= MIN_SHARPNESS:
+            by_offset["shifted" if abs(off_ms) >= 10.0 else "aligned"].append(m0_track)
+        per_track.append((m0_track, f"ずれ {'未測定' if off_ms is None else f'{off_ms:+.0f} ms（確かさ {sharp:.1f}）'}  {tr.kit or '?'}  {tr.key}"))
         if args.check_offset:
             offsets.append(estimate_offset(x, cfg.sr, hits, cfg))
 
@@ -157,6 +182,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{c:8s} {np.mean(per_class[c]['p']):6.3f} {np.mean(per_class[c]['r']):6.3f} {np.mean(per_class[c]['f']):6.3f}")
     m0 = float(np.mean([np.mean(per_class[c]["f"]) for c in M0_CLASSES if c in per_class]))
     print(f"M0-1（kick/snare/hihat の F の平均）: {m0:.3f}  目安 0.85")
+    # 上の表は曲ごとの値の平均で、正解にも推定にも打の無い曲は 1 と数える（タムやシンバルは、打の無い曲が大半を占める）。
+    # 下は全部の曲の打を足して数えた値
+    print("打をまとめた値（全部の曲の打を足して数える。打の無い曲を 1 と数えない）:")
+    print(f"{'種類':8s} {'P':>6s} {'R':>6s} {'F':>6s}  正解の打  打のある曲")
+    pooled_f = {}
+    for c in classes:
+        d = pooled[c]
+        pp = d["hit"] / d["est"] if d["est"] else 0.0
+        rr = d["hit"] / d["ref"] if d["ref"] else 0.0
+        pooled_f[c] = 2 * pp * rr / (pp + rr) if pp + rr > 0 else 0.0
+        print(f"{c:8s} {pp:6.3f} {rr:6.3f} {pooled_f[c]:6.3f}  {d['ref']:8d}  {d['tracks']:4d} / {len(tracks)}")
+    print(f"まとめた M0-1: {float(np.mean([pooled_f[c] for c in M0_CLASSES if c in pooled_f])):.3f}")
+    if by_offset["shifted"] or by_offset["aligned"]:
+        def _mean(v: list[float]) -> str:
+            return f"{np.mean(v):.3f}（{len(v)} 本）" if v else "（0 本）"
+
+        print(f"正解のずれ（label_offsets.csv）が 10 ms 以上の曲の M0-1: {_mean(by_offset['shifted'])}、10 ms 未満の曲: {_mean(by_offset['aligned'])}"
+              "  ← 直した後も「10 ms 以上」の側だけ低ければ、ずれの直し方が合っていない疑い（--worst 10 で曲を見る）")
+    if args.worst > 0:
+        print(f"M0-1 の低い曲（下位 {args.worst}）:")
+        for v, text in sorted(per_track, key=lambda t: t[0])[: args.worst]:
+            print(f"  {v:.3f}  {text}")
     if offsets:
         print(f"音声と MIDI のずれの見積もり: 中央値 {np.median(offsets) * 1000:.1f} ms（正なら音声が遅い）")
     if args.by_kit:

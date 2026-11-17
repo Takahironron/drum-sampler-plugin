@@ -118,3 +118,25 @@ def test_a_hit_at_the_very_start_survives_a_tiny_negative_offset():
     # 区間を途中から始めるとき: 頭の 3 ms 前の打は頭の打として残し（時刻 0）、20 ms 前の打は落とす
     got = truth_hits_in_window([Hit(0.480, "kick", 100), Hit(0.497, "snare", 90), Hit(0.6, "kick", 100)], start=0.5, duration=1.0)
     assert [(round(h.time, 3), h.cls) for h in got] == [(0.0, "snare"), (0.1, "kick")]
+
+
+def test_summary_reports_direction_tail_and_where_offsets_come_from():
+    """要約: ずれの向き、探す範囲の端に当たったもの、ずれが演奏（元の MIDI）で決まるのかキットで決まるのか。"""
+    rng = np.random.default_rng(0)
+    offsets = [0.3, -0.5, 1.0, 12.0, 35.0, -60.0, 120.0, 245.0, 0.1, 0.2]
+    text = egmd_offsets.summarize(offsets, [3.0] * 9 + [1.0])
+    assert "9 本" in text and "山がはっきりせず使わないもの 1 本" in text
+    assert "音が遅いもの（正）80%、早いもの（負）20%" in text  # 10 ms 以上の 5 本のうち 4 本が正
+    assert "100 ms 以上 2 本" in text and "端から 10 ms 以内 1 本" in text and "範囲の外かもしれない" in text
+    assert "範囲の外" not in egmd_offsets.summarize([0.0, 20.0, -30.0], [3.0, 3.0, 3.0])
+
+    assert egmd_offsets.sequence_of("drummer1/session1/12_rock_120_beat_4-4_37.midi") == "drummer1/session1/12_rock_120_beat_4-4"
+    assert egmd_offsets.sequence_of("drummer1/session1/a.midi") == "drummer1/session1/a.midi"
+    # 演奏ごとに決まるずれ（キットによらない）＋ 小さな測定の誤差
+    per_sequence = {f"seq{i}": float(rng.choice([0.0, 0.0, 15.0, -40.0, 80.0])) for i in range(12)}
+    rows = [(seq, f"kit{k}", off + float(rng.normal(0, 0.5))) for seq, off in per_sequence.items() for k in range(6)]
+    lines = egmd_offsets.structure(rows)
+    assert len(lines) == 2 and lines[0].startswith("演奏") and lines[1].startswith("キット")
+    explained = [int(line.split("ばらつきの ")[1].split("%")[0]) for line in lines]
+    assert explained[0] >= 98 and explained[1] <= 10, lines
+    assert egmd_offsets.structure(rows[:10]) == []  # 少なすぎるときは出さない

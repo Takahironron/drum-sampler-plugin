@@ -49,7 +49,7 @@
 - pluginval で VST3 を自動検査、GitHub Actions で Windows と macOS のビルド、解析の精度は固定の評価用ステム集で毎回測る（回帰テスト）。
 - Takahiro の評価用ステム（区分 A、CD 曲）はクラウドに無い。パート分け・切り出し・再現を変えるときは、先にクラウドで E-GMD と StemGMD の標本（下の表）で前後を測り、それから Takahiro に区分 A での実行と聞き比べを頼む。
 - **プラグインで鳴る音は、MIDI（時刻・種類・強さ）だけでキットを鳴らした音。** 物差しは `run_eval.py` の「MIDI だけで鳴らす」（`rerender_midi.wav`。キットは `extract.build_kit_by_level`）。方式 C（`rerender_parts.wav`）は MIDI に無い情報を使う（打ごとの音色と、位置の合わせ直し。距離は代表音の選びの乱数で、12 曲平均が ±0.03 揺れる）。キックやスネアだけの違いは、混ざった音の距離ではなく表の「種類ごとの距離」で見る。鳴らし方の決まり（キットと MIDI の約束）は `analysis/README.md`。Python の `render_midi` と C++ の `SampleEngine` は 1 サンプル単位で一致させてあり（CI の engine-parity）、変えるときは両方を変える。採譜の入口（間引き・対数メル・打点を拾う）も Python（`drumeval/features.py`、`infer.py`）と C++（`plugin/Source/Analysis/`）で一致させてある（CI の transcribe-parity）。
-- **E-GMD の配布物は、正解の MIDI と音がファイルごとにずれているものがある**（標本の 34% が 10 ms 以上、7% が 50 ms 以上）。学習と採点の前に `analysis/egmd_offsets.py` で測って直す（`label_offsets.csv`、評価用フォルダは `label_offset.txt`）。v5 までのモデルと E-GMD での数字は直していない。
+- **E-GMD の配布物は、正解の MIDI と音がファイルごとにずれているものがある**（test 分割の全部 5,271 本で、31% が 10 ms 以上、9% が 50 ms 以上）。学習と採点の前に `analysis/egmd_offsets.py` で測って直す（`label_offsets.csv`、評価用フォルダは `label_offset.txt`）。v5 までのモデルは直さないラベルで学習した。v5 の M0-1（E-GMD test の 60 本）は、直さない正解で 0.773、直した正解で 0.819（2026-11-17）。これより前の記録の E-GMD の数字は、直さない正解のもの。`train_transcriber.py` は、使うトラックにずれを測っていないものがあると学習を始めない。
 
 ### 機能の網羅（計画書4章）
 

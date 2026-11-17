@@ -121,6 +121,34 @@ def test_train_egmd_and_eval(tmp_path):
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "M0-1" in r.stdout and "ずれの見積もり" in r.stdout and "正解の時刻のずれ: " in r.stdout
+    # 曲ごとの平均（打の無い曲を 1 と数える）とは別に、打をまとめた値と、ずれの大きさで分けた M0-1 も出す
+    assert "打をまとめた値" in r.stdout and "まとめた M0-1" in r.stdout and "打のある曲" in r.stdout
+    assert "10 ms 以上の曲の M0-1" in r.stdout
+    r = subprocess.run([sys.executable, str(ev), str(out), str(root), "--split", "validation", "--seconds", "5", "--worst", "1"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and "M0-1 の低い曲（下位 1）" in r.stdout and "ずれ " in r.stdout
     r = subprocess.run([sys.executable, str(ev), str(out), str(root), "--split", "validation", "--seconds", "5", "--no-label-offsets"],
                        capture_output=True, text=True)
     assert r.returncode == 0 and "直さない（--no-label-offsets）" in r.stdout
+
+
+def test_training_stops_when_label_offsets_are_only_partly_measured(tmp_path):
+    """ずれの一覧が途中まで（例: test 分割だけ測った）か、無いとき、学習を始めない（測っていないトラックはずれたラベルのままになる）。"""
+    root = tmp_path / "egmd"
+    _fake_egmd(root)
+    tools = Path(__file__).resolve().parents[1]
+    out = tmp_path / "m.onnx"
+    train = [sys.executable, str(tools / "train_transcriber.py"), "--egmd", str(root), "--epochs", "1", "--batch", "2", "--seconds", "3",
+             "--chunks-per-track", "1", "--workers", "0", "--hidden", "16", "--val-tracks", "1", "--val-seconds", "5", "--max-tracks", "3", "--out", str(out)]
+
+    r = subprocess.run(train, capture_output=True, text=True)  # 一覧が無い
+    assert r.returncode == 1 and "まだ測っていない" in r.stderr and "egmd_offsets.py" in r.stderr and not out.exists()
+
+    r = subprocess.run([sys.executable, str(tools / "egmd_offsets.py"), str(root), "--workers", "1", "--max-tracks", "1"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    r = subprocess.run(train, capture_output=True, text=True)  # 1 本だけ測った
+    assert r.returncode == 1 and "まだ測っていない" in r.stderr and not out.exists()
+
+    r = subprocess.run(train + ["--no-label-offsets"], capture_output=True, text=True)  # 直さないと明示すれば学習する（比較用）
+    assert r.returncode == 0, r.stderr
+    assert "正解の時刻のずれの補正: しない" in r.stdout and out.exists()
