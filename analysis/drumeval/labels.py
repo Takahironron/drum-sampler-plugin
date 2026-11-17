@@ -175,6 +175,8 @@ def load_hits_midi(path: str | Path, note_map: dict[int, str] | None = None, cha
     return hits
 
 
+MIDI_TICKS_PER_BEAT = 960  # 書き出す MIDI の時刻の刻み（1 拍の 960 分の 1。120 BPM で約 0.5 ms）
+
 # 粗い 5 種 → GM ドラムマップの代表ノート（MIDI に書き出すとき。プラグインの `KitModel::noteForClass` と同じ）
 COARSE_TO_NOTE: dict[str, int] = {"kick": 36, "snare": 38, "hihat": 42, "tom": 45, "cymbal": 49}
 
@@ -184,20 +186,22 @@ def save_hits_midi(hits: Iterable[Hit], path: str | Path, bpm: float = 120.0, of
 
     DAW に読み込んで元の音と並べて確かめたり、キットを読み込んだプラグインを鳴らしたりするのに使う。強さが無い打は 100。
     `offset_sec` を足すと、切り出した区間の時刻をファイルの先頭からの時刻に戻せる。
+    時刻の刻みは 1 拍の 960 分の 1（120 BPM で約 0.5 ms）。
     """
     import mido
 
-    mid = mido.MidiFile(type=0, ticks_per_beat=480)
+    tpb = MIDI_TICKS_PER_BEAT
+    mid = mido.MidiFile(type=0, ticks_per_beat=tpb)
     tr = mido.MidiTrack()
     mid.tracks.append(tr)
     tr.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(bpm), time=0))
     events = []
     for h in hits:
-        tick = int(round((h.time + offset_sec) * bpm / 60.0 * 480))
+        tick = int(round((h.time + offset_sec) * bpm / 60.0 * tpb))
         note = COARSE_TO_NOTE.get(to_coarse(h.cls), 39)
         vel = h.velocity or 100
         events.append((tick, 1, mido.Message("note_on", channel=9, note=note, velocity=vel, time=0)))
-        events.append((tick + 48, 0, mido.Message("note_off", channel=9, note=note, velocity=0, time=0)))
+        events.append((tick + tpb // 10, 0, mido.Message("note_off", channel=9, note=note, velocity=0, time=0)))
     events.sort(key=lambda e: (e[0], e[1]))
     last = 0
     for tick, _, msg in events:

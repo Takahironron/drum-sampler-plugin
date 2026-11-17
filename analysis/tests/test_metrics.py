@@ -128,3 +128,22 @@ def test_band_balance_shows_missing_highs():
     assert all(abs(v) < 0.1 for v in same.values())  # 音量だけの違いは差にならない
     absolute = band_balance_db(x, 0.5 * x, sr, match_rms=False)
     assert all(abs(v + 6.02) < 0.1 for v in absolute.values())
+
+
+def test_part_distance_ignores_silence_between_hits_and_overall_level():
+    """パート 1 つの距離: 音量だけの違いと、打の間の聞こえない所の違いは数えない。打の位置がずれると大きくなる。"""
+    from drumeval import part_stft_distance
+
+    sr = 22050
+    rng = np.random.default_rng(1)
+    t = np.arange(int(0.12 * sr)) / sr
+    hit = np.sin(2 * np.pi * 70 * t) * np.exp(-t / 0.03)
+    x = np.zeros(2 * sr)
+    for k in range(4):
+        x[int((0.1 + 0.45 * k) * sr):][: hit.size] += hit
+    assert part_stft_distance(x, 0.25 * x) < 1e-6  # 音量だけの違い
+    quiet = x + rng.standard_normal(x.size) * 1e-6  # 聞こえない雑音（そのまま測ると、無音の所の対数の差で大きくなる）
+    assert part_stft_distance(x, quiet) < 0.05
+    assert multi_resolution_stft_distance(x, quiet)["total"] > 5 * part_stft_distance(x, quiet)
+    late = np.concatenate([np.zeros(int(0.010 * sr)), x])[: x.size]  # 全部の打が 10 ms 遅い
+    assert part_stft_distance(x, late) > 10 * part_stft_distance(x, quiet)

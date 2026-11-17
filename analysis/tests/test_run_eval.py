@@ -141,11 +141,27 @@ def test_product_path_writes_midi_only_render_and_matching_midi(tmp_path):
     assert r.returncode == 0, r.stderr
     md = out.read_text(encoding="utf-8")
     assert "STFT（MIDI だけで鳴らす）" in md and "MIDI だけで鳴らしたときの距離の平均" in md and "F（MIDI にした打点" in md
-    assert {"rerender_midi.wav", "hits_model.mid", "kit"} <= {p.name for p in song.iterdir()}
+    assert "MIDI だけの損失の内訳" in md and "位置が 5 ms 以上ずれる打の割合" in md
+    assert {"rerender_midi.wav", "rerender_midi_km.wav", "hits_model.mid", "kit"} <= {p.name for p in song.iterdir()}
+    assert "STFT（MIDI だけ、k-means のキット）" in md and "MIDI だけ・k-means のキット − 元" in md
     # 保存したキットと MIDI だけで、元に近い音が鳴る（プラグインに渡すもの）
     kit = load_kit(song / "kit")
     hits = [Hit(h.time, to_coarse(h.cls), h.velocity) for h in load_hits(song / "hits_model.mid")]
     assert set(kit.level_range) == set(kit.parts) and all(1 <= h.velocity <= 127 for h in hits)
     y = render_midi(hits, kit, duration=dur)
     y *= np.sqrt(np.mean(x**2)) / np.sqrt(np.mean(y**2))
-    assert multi_resolution_stft_distance(x, y)["total"] < 0.5  # 表の値（メモリ上）とは、MIDI の時刻の刻み（約 1 ms）の分だけ違う
+    # 表の値（メモリ上で鳴らした音の距離）と同じ音になる。違いは MIDI の時刻の刻み（約 0.5 ms）とキットの WAV（24 bit）の分だけ
+    lines = md.splitlines()
+    heads = [h.strip() for h in lines[2].split("|")[1:-1]]
+    reported = float([v.strip() for v in lines[4].split("|")[1:-1]][heads.index("STFT（MIDI だけで鳴らす）")])
+    assert abs(multi_resolution_stft_distance(x, y)["total"] - reported) < 0.1
+    row = dict(zip(heads, [v.strip() for v in lines[4].split("|")[1:-1]]))
+    offsets = dict((t[:2], float(t[2:])) for t in row["位置が 5 ms 以上ずれる打の割合（MIDI だけ、種類別）"].split())
+    assert offsets["ki"] == 0.0 and offsets["sn"] == 0.0  # 同じ音を並べた合成のステムでは、どの打も位置が合う
+    # 種類ごとの距離（MIDI だけ／方式 C／自己再現）: 同じ音を並べたキックは、MIDI だけでも方式 C と変わらずそのパートの音に近い
+    col = next(h for h in heads if h.startswith("種類ごとの距離"))
+    part_d = {t[:2]: [float(v) for v in t[2:].split("/")] for t in row[col].split()}
+    assert set(part_d) >= {"ki", "sn"} and all(len(v) == 3 for v in part_d.values())
+    assert part_d["ki"][0] < part_d["ki"][1] + 0.1 and part_d["ki"][2] < 0.2, part_d
+    assert "種類ごとの距離の平均（MIDI だけ／方式 C／自己再現）" in md
+    assert reported < 0.7  # 合成音の v0 は、スネアの位置にハイハットを余分に出す（その分だけ遠い）

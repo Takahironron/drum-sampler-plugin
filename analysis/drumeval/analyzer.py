@@ -4,10 +4,11 @@ Phase 1 段階 1（2026-11-16 合格）で確かめた製品の経路を、1 つ
 
     ② 採譜          ONNX の採譜モデルで打点（時刻・種類）を出す。`hits` を渡せばそれを使う
     ③ パート分け    打点で縛った NMFD（`nmfd.py`）。タムの打が 4 つ以上あればタムのパートも作る
-    （打点の合わせ直し）各打の時刻を、そのパートの音の立ち上がりに合わせ直す
+    （打点の合わせ直し）各打の時刻を、そのパートの音の立ち上がりに合わせ直す（種類ごとの立ち上がりの形に、相互相関でそろえる）
     ④ 一打の切り出し 同じ種類の前後に打の無い打を、次の同じ種類の打の手前まで切り出す
-    ⑤ キット         種類ごとに、特徴（音量・減衰・明るさ・帯域）の k-means の代表 `kit_size` 音。分離の確からしさ
-                     （`nmfd.hit_confidence`）の低い打（他の音と重なった打）からは代表を取らない
+    ⑤ キット         種類ごとに、音量の順に `kit_size` 個の区分に分け、各区分から普通の音（音色がその区分の中央に近く、
+                     余韻が切れていない音）を 1 つずつ。分離の確からしさ（`nmfd.hit_confidence`）の低い打（他の音と重なった打）
+                     からは取らない
     （強さ）         各打の音量を、種類ごとの範囲（`Kit.level_range`）で MIDI の強さ 1〜127 に直す
 
 返り値の `Analysis.hits` と `Analysis.kit` があれば、MIDI だけで元に近い音を鳴らせる（`extract.render_midi`、プラグインの `SampleEngine`）。
@@ -24,8 +25,8 @@ from pathlib import Path
 import numpy as np
 
 from .extract import (
-    Kit, attach_confidence, build_kit_by_features, cut_segments_from_parts, hit_segments_from_parts, level_range_for, refine_onsets,
-    render_midi, save_kit, segment_features, silent_hits, velocity_for_level,
+    Kit, attach_confidence, build_kit_by_level, cut_segments_from_parts, hit_segments_from_parts, level_range_for, refine_onsets,
+    render_midi, save_kit, silent_hits, velocity_for_level,
 )
 from .labels import COARSE_CLASSES, Hit, save_hits_midi, to_coarse
 from .nmfd import config_for, hit_confidence, parts_for_hits, separate
@@ -84,7 +85,7 @@ def analyze(x: np.ndarray, sr: int, model: str | Path | None = None, hits: list[
     confidence = hit_confidence(stats, hits, sr) if hits else []
     segs = cut_segments_from_parts(part_audio, hits)
     attach_confidence(segs, hits, confidence)  # 他の音と重なった打は、代表音の候補から外れる
-    kit = build_kit_by_features(segs, sr, n_per_class=kit_size, feature_fn=segment_features)
+    kit = build_kit_by_level(segs, sr, n_per_class=kit_size)
     for c in kit.parts:
         kit.level_range[c] = level_range_for([lv for lv, h in zip(levels, hits) if lv is not None and h.cls == c])
     hits = [Hit(h.time, h.cls, velocity_for_level(lv, kit.level_range[h.cls]) if lv is not None and h.cls in kit.level_range else 100)

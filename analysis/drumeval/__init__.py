@@ -9,6 +9,7 @@ from .metrics import (
     transcription_scores,
     m0_transcription_score,
     multi_resolution_stft_distance,
+    part_stft_distance,
     band_balance_db,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "transcription_scores",
     "m0_transcription_score",
     "multi_resolution_stft_distance",
+    "part_stft_distance",
     "band_balance_db",
 ]

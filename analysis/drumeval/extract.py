@@ -153,38 +153,208 @@ def level_for_velocity(velocity: int | None, level_range: tuple[float, float]) -
     return lo + (hi - lo) * (min(max(int(velocity), 1), 127) - 1) / 126.0
 
 
-def refine_onsets(parts: dict[str, tuple[np.ndarray, int]], hits: list[Hit], search_sec: float = 0.02) -> list[Hit]:
+def _refine_onset_single(x: np.ndarray, sr: int, time: float, search_sec: float) -> float | None:
+    """1 打だけで立ち上がりを探す: 打点の前後 `search_sec` の中で、「その後 3 ms の大きさ ÷ その前 6 ms の大きさ」が最大の位置。
+
+    はっきりした立ち上がりが無ければ（比が振幅で 1.5 未満）None。打の少ない種類（ひな形を作れない）にだけ使う。前の音の余韻や、
+    分離の窓による前ぶれ（プリエコー）、低い音の包絡の波打ちがあると、数 ms〜十数 ms 離れた位置を取ることがある（StemGMD の正解の打点で、
+    キックの 11% が 5 ms 以上ずれた）ので、打が 4 つ以上ある種類は `refine_onsets` がひな形に合わせる。
+    """
+    n_after, n_before = max(int(0.003 * sr), 1), max(int(0.006 * sr), 1)
+    c = int(round(time * sr))
+    lo, hi = max(c - int(search_sec * sr), n_before), min(c + int(search_sec * sr), x.size - n_after)
+    if hi <= lo:
+        return None
+    p = np.asarray(x[lo - n_before : hi + n_after], dtype=np.float64) ** 2
+    cum = np.concatenate([[0.0], np.cumsum(p)])
+    i = np.arange(n_before, n_before + (hi - lo))
+    after = (cum[i + n_after] - cum[i]) / n_after
+    before = (cum[i] - cum[i - n_before]) / n_before
+    floor = 1e-4 * float(after.max()) + 1e-12  # 無音どうしの比で動かないように、その打の大きさに対する小さな床を足す
+    ratio = (after + floor) / (before + floor)
+    k = int(np.argmax(ratio))
+    if ratio[k] < 1.5**2:
+        return None
+    return (lo + k) / sr
+
+
+ONSET_ENV_STEP_SEC = 0.00025  # 立ち上がりを合わせるときの包絡の刻み（0.25 ms）
+
+
+def _onset_envelope(x: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
+    """1 ms の二乗平均の包絡を 0.25 ms 刻みで。返り値は（包絡, 1 秒あたりの点の数）。"""
+    x = np.asarray(x, dtype=np.float64)
+    q = max(int(round(ONSET_ENV_STEP_SEC * sr)), 1)
+    w = max(int(0.001 * sr), 1)
+    cum = np.concatenate([[0.0], np.cumsum(x * x)])
+    centers = np.arange(0, x.size, q)
+    env = np.sqrt((cum[np.minimum(centers + w // 2 + 1, x.size)] - cum[np.maximum(centers - w // 2, 0)]) / w)
+    return env, sr / q
+
+
+def _rise_strength(env: np.ndarray, rate: float) -> np.ndarray:
+    """立ち上がりの強さ: 包絡が 2 ms 前より増えた分（減った所は 0）。"""
+    lag = max(int(0.002 * rate), 1)
+    return np.maximum(env - np.concatenate([np.zeros(lag), env[:-lag]]), 0.0)
+
+
+def refine_onsets(parts: dict[str, tuple[np.ndarray, int]], hits: list[Hit], search_sec: float = 0.02, iterations: int = 3,
+                  rise: float = 0.1, post_sec: float = 0.02, shape: str = "rise", stay: float = 0.2,
+                  stats: dict | None = None) -> list[Hit]:
     """各打の時刻を、そのパートの音の立ち上がりに合わせ直す（採譜の時刻は約 10 ms 刻みで、最大 1 フレームずれる）。
 
-    打点の前後 `search_sec` の中で、「その後 3 ms の大きさ ÷ その前 6 ms の大きさ」が最大になる位置を立ち上がりとする
-    （前の打の余韻が鳴っていても、比なら立ち上がりが分かる）。はっきりした立ち上がりが無い打（比が 1.5 未満）は動かさない。
-    合わせ直すと、切り出した音の頭から立ち上がりまでの長さがそろい、MIDI の時刻でそのまま鳴らしても位置が合う。
+    種類ごとに「立ち上がりの形のひな形」を作り、各打をひな形との相互相関が最大になる位置へ動かす。
+
+    - 比べるのは、立ち上がりの強さ（1 ms の二乗平均の包絡が、2 ms 前より増えた分。0.25 ms 刻み）。`shape="env"` なら包絡そのもの。
+      包絡そのものだと、余韻の長さが違う音（ハイハットの開閉）で、音の大きい部分どうしが重なる位置に引かれる。
+    - ひな形は、各打の前 30 ms〜後 `post_sec` を、その中の最大で割り、打をまたいで中央値を取ったもの。
+    - 動かす幅は、元の時刻から ±`search_sec` と、隣の同じ種類の打との間隔の 0.45 倍の小さい方まで。比べる区間も、隣の同じ種類の
+      打の手前までに限る（装飾音や連打で、隣の打の立ち上がりに引かれないように）。元の時刻から離れるほど、相関を少し割り引く
+      （`stay`。±`search_sec` の端で 1 − stay 倍。立ち上がりのはっきりしない小さい打を、遠くへ動かさない）。
+    - ひな形を作り直しながら `iterations` 回繰り返し、最後に包絡のひな形の立ち上がり（山の手前で、谷から山までの `rise` の高さを
+      上向きに超える位置）を打点にする。正解の時刻と比べると、キックは 0.6〜0.9 ms 後ろ（ゆっくり立ち上がる）、スネアは ±0.5 ms、
+      ハイハットは 1.3〜3.0 ms 手前（分離の窓による前ぶれが先に上がる）。種類の中では一定なので、音の位置は変わらない
+      （切り出しは打点の `SAMPLE_LEAD_SEC` 前から）。
+
+    同じ種類の打は立ち上がりの形が重なるように時刻が決まるので、切り出した音の頭から立ち上がりまでの長さがそろい、どの音を
+    どの打の時刻に置いても位置が合う。MIDI だけで鳴らすときに必要（方式 C は打ごとに相互相関で置き直すので、ずれが隠れていた。
+    区分 A の a07 で「MIDI だけだとキックが悪い」と聞こえた原因。2026-11-17）。
+
+    1 打ごとに立ち上がりを探す従来の方法（`_refine_onset_single`）との比較（正解の時刻との差のばらつきが 5 ms を超える打の割合。
+    正解の打点／取りこぼしと時刻の揺れを入れた打点）: StemGMD キック 11%／9% → 1%／1%、スネア 7%／4% → 2%／2%、ハイハット 9%／11% → 5%／8%。
+    E-GMD キック 4%／5% → 1%／1%、スネア 9%／5% → 8%／6%、ハイハット 15%／16% → 8%／10%。残るのは、小さい打（ゴーストノート）と、
+    隣の打が 60 ms 以内にある打、スネアと同時に鳴るハイハット。ひな形との相関が 0.9 以上の打（キックの 9 割、スネアとハイハットの 5〜8 割）は、
+    ずれるのが 1.4% 以下。
+    打が 4 つ未満の種類は従来の方法で合わせる。パートの無い種類、端の打、音の無い打は動かさない。
+
+    `stats`（空の dict を渡す）には、打ごとの `"corr"`（ひな形との相関の最大値、0〜1。合わせなかった打は None）を `hits` と同じ順で入れる。
     """
-    out: list[Hit] = []
-    for h in hits:
-        cls = to_coarse(h.cls)
+    out = list(hits)
+    corr_out: list[float | None] = [None] * len(hits)
+    by_cls: dict[str, list[int]] = {}
+    for i, h in enumerate(hits):
+        by_cls.setdefault(to_coarse(h.cls), []).append(i)
+    for cls, idx in by_cls.items():
         if cls not in parts:
-            out.append(h)
             continue
         x, sr = parts[cls]
-        n_after, n_before = max(int(0.003 * sr), 1), max(int(0.006 * sr), 1)
-        c = int(round(h.time * sr))
-        lo, hi = max(c - int(search_sec * sr), n_before), min(c + int(search_sec * sr), x.size - n_after)
-        if hi <= lo:
-            out.append(h)
+        x = np.asarray(x, dtype=np.float64)
+        if len(idx) < 4:
+            for i in idx:
+                t = _refine_onset_single(x, sr, hits[i].time, search_sec)
+                if t is not None:
+                    out[i] = Hit(t, hits[i].cls, hits[i].velocity)
             continue
-        p = np.asarray(x[lo - n_before : hi + n_after], dtype=np.float64) ** 2
-        cum = np.concatenate([[0.0], np.cumsum(p)])
-        i = np.arange(n_before, n_before + (hi - lo))
-        after = (cum[i + n_after] - cum[i]) / n_after
-        before = (cum[i] - cum[i - n_before]) / n_before
-        floor = 1e-4 * float(after.max()) + 1e-12  # 無音どうしの比で動かないように、その打の大きさに対する小さな床を足す
-        ratio = (after + floor) / (before + floor)
-        k = int(np.argmax(ratio))
-        if ratio[k] < 1.5**2:  # 大きさ（振幅）の比で 1.5 未満
-            out.append(h)
+        env, rate = _onset_envelope(x, sr)  # 1 ms の二乗平均を 0.25 ms 刻みで
+        pre, post, span = int(0.03 * rate), int(post_sec * rate), int(search_sec * rate)
+        env_mark = env  # 立ち上がりの位置は、いつも包絡そのもので決める
+        if shape == "rise":  # 立ち上がりの強さ（2 ms 前との差の正の部分）
+            env = _rise_strength(env, rate)
+        cum2 = np.concatenate([[0.0], np.cumsum(env * env)])
+        times = np.array([hits[i].time for i in idx])
+        order = np.argsort(times, kind="stable")
+        d = np.diff(times[order])
+        gap_prev = np.full(len(idx), np.inf)
+        gap_next = np.full(len(idx), np.inf)
+        gap_prev[order[1:]] = d
+        gap_next[order[:-1]] = d
+        max_lag = np.minimum(span, np.floor(0.45 * np.minimum(gap_prev, gap_next) * rate)).astype(int)
+        margin = int(0.002 * rate)
+        n_pre = np.clip(np.floor(gap_prev * rate) - margin, 0, pre).astype(int)  # 比べる区間（隣の同じ種類の打の手前まで）
+        n_post = np.clip(np.floor(gap_next * rate) - margin, 0, post).astype(int)
+        orig = np.round(times * rate).astype(int)
+        cur = orig.copy()
+        frac = np.zeros(len(idx))  # 0.25 ms より細かい分（放物線で補う）
+        aligned = np.zeros(len(idx), dtype=bool)
+        corr = np.zeros(len(idx))  # ひな形との相関（元の時刻からの遠さで割り引く前の値）
+
+        def template(positions: np.ndarray) -> np.ndarray | None:
+            rows = []
+            for c in positions:
+                if c - pre < 0 or c + post > env.size:
+                    continue
+                seg = env[c - pre : c + post]
+                m = float(seg.max())
+                if m > 1e-9:
+                    rows.append(seg / m)
+            if len(rows) < 4:
+                return None
+            t = np.median(np.stack(rows), axis=0)
+            return t - t.min()
+
+        peaks = np.array([float(env[max(c - pre, 0) : max(c + post, 1)].max()) for c in orig])
+        ref_level = float(np.median(peaks))
+        tmpl = template(orig)
+        for _ in range(iterations):
+            if tmpl is None:
+                break
+            for j in range(len(idx)):
+                ml = int(max_lag[j])
+                lo_t, hi_t = pre - int(n_pre[j]), pre + int(n_post[j])
+                a, b = orig[j] - ml - int(n_pre[j]), orig[j] + ml + int(n_post[j])
+                if ml <= 0 or hi_t - lo_t < int(0.008 * rate) or a < 0 or b > env.size or peaks[j] < 0.01 * ref_level:
+                    continue  # 隣が近すぎる打、端の打、音の無い打は動かさない
+                t_j = tmpl[lo_t:hi_t]
+                if not np.any(t_j > 0):
+                    continue
+                num = np.correlate(env[a:b], t_j, mode="valid")  # 長さ 2·ml + 1。k 番目は元の時刻からのずれ k − ml
+                k0 = np.arange(2 * ml + 1) + a
+                v = num / ((np.sqrt(cum2[k0 + t_j.size] - cum2[k0]) + 1e-12) * (float(np.linalg.norm(t_j)) + 1e-12))
+                raw = v
+                if stay > 0:  # 元の時刻から離れるほど少し不利にする（立ち上がりのはっきりしない打を、遠くへ動かさない）
+                    v = v * (1.0 - stay * np.abs(np.arange(-ml, ml + 1)) / max(span, 1))
+                k = int(np.argmax(v))
+                corr[j] = float(raw[k])
+                f = 0.0
+                if 0 < k < v.size - 1:
+                    den = v[k - 1] - 2 * v[k] + v[k + 1]
+                    if den < 0:
+                        f = float(np.clip(0.5 * (v[k - 1] - v[k + 1]) / den, -0.5, 0.5))
+                cur[j], frac[j], aligned[j] = orig[j] + k - ml, f, True
+            if aligned.sum() < 4:
+                tmpl = None
+                break
+            tmpl = template(cur[aligned])
+        if tmpl is None:
             continue
-        out.append(Hit((lo + k) / sr, h.cls, h.velocity))
+        if shape != "env":
+            env = env_mark
+            tmpl = template(cur[aligned])
+            if tmpl is None:
+                continue
+        # ひな形の立ち上がりの位置: 打点の近くの山の手前で、谷から山までの rise の高さを上向きに超える位置。
+        # 低い音は包絡が周期ごとに落ち込む（キックの 50〜80 Hz）ので、「3 ms 以上続けて下回った後」の超え方だけを立ち上がりとみなす
+        lo_p, hi_p = max(pre - span, 1), min(pre + span + int(0.015 * rate), tmpl.size)
+        k_peak = lo_p + int(np.argmax(tmpl[lo_p:hi_p]))
+        k_lo = max(k_peak - int(0.03 * rate), 0)
+        valley = float(tmpl[k_lo : k_peak + 1].min())
+        level = valley + rise * (float(tmpl[k_peak]) - valley)
+        hold = max(int(0.003 * rate), 1)
+        below = tmpl[k_lo : k_peak + 1] < level
+        k, run, first = None, 0, None
+        for m in range(below.size):
+            if below[m]:
+                run += 1
+                continue
+            if m > 0 and below[m - 1]:  # 上向きに超えた
+                if first is None:
+                    first = m
+                if run >= hold or m - run == 0:  # 十分長く下回っていたか、窓の頭から下回っていた
+                    k = m
+            run = 0
+        if k is None:
+            k = first if first is not None else 0
+        k += k_lo
+        f = 0.0
+        if k > 0 and tmpl[k] > tmpl[k - 1]:  # しきい値を超える位置を、前の点との間で直線で補う
+            f = float(np.clip((level - tmpl[k - 1]) / (tmpl[k] - tmpl[k - 1]), 0.0, 1.0)) - 1.0
+        shift = k + f - pre
+        for j, i in enumerate(idx):
+            if aligned[j]:  # 合わせなかった打は元の時刻のまま
+                out[i] = Hit(float(max((cur[j] + frac[j] + shift) / rate, 0.0)), hits[i].cls, hits[i].velocity)
+                corr_out[i] = float(corr[j])
+    if stats is not None:
+        stats["corr"] = corr_out
     return out
 
 
@@ -258,7 +428,8 @@ def self_render_from_parts(
     """各打を「その打自身の区間」（打点から同じ種類の次の打まで）で鳴らし直す（自己再現）。
 
     層やラウンドロビンの量子化が無いので、元との距離は「打点の誤り・取りこぼし」と「区間の切り方」だけを映す。
-    キットでの再現との差が、層とラウンドロビンで失う分。
+    キットでの再現との差が、層とラウンドロビンで失う分。区間は、キットの音と同じく打点の `SAMPLE_LEAD_SEC` 前から取る
+    （打点は立ち上がりの頭より少し後ろに来ることがある。打点ちょうどで切ると、前の区間のフェードが立ち上がりの頭に掛かる）。
     """
     sr = next(iter(parts.values()))[1]
     n = int(duration * sr)
@@ -267,7 +438,7 @@ def self_render_from_parts(
         own = sorted((h for h in hits if to_coarse(h.cls) == cls), key=lambda h: h.time)
         limit = max_len_for(cls, max_len_sec)
         for i, h in enumerate(own):
-            start = int(round(h.time * psr))
+            start = max(int(round((h.time - SAMPLE_LEAD_SEC) * psr)), 0)
             next_t = own[i + 1].time if i + 1 < len(own) else h.time + limit
             end = min(start + int(min(next_t - h.time, limit) * psr), x.size, n)
             if end - start < int(0.005 * psr):
@@ -415,6 +586,73 @@ def build_kit_by_features(segments: list[Segment], sr: int, n_per_class: int | d
     return Kit(sr, parts, feat_norm)
 
 
+TAIL_CUT_DB = -35.0  # 区間の終わりの大きさがピークからこれより大きければ、余韻の途中で切れている（次の同じ種類の打が近かった）
+
+
+def tail_level_db(a: np.ndarray, sr: int) -> float:
+    """切り出した音の終わり（フェードの前の 20 ms）の大きさ ÷ ピーク（dB）。0 に近いほど、余韻の途中で切れている。"""
+    n1, n0 = int(0.03 * sr), int(0.01 * sr)
+    if a.size < n1 + 8:
+        return 0.0
+    return float(20.0 * np.log10(np.sqrt(np.mean(a[-n1:-n0] ** 2)) / (np.max(np.abs(a)) + 1e-12) + 1e-12))
+
+
+def _timbre(features: np.ndarray) -> np.ndarray:
+    """音量によらない特徴（`segment_features` から）: 減衰、明るさ、帯域の配分（ピークからの差）。[n, 5]。"""
+    f = np.atleast_2d(np.asarray(features, dtype=float))
+    return np.stack([f[:, 1], f[:, 2], f[:, 3] - f[:, 0], f[:, 4] - f[:, 0], f[:, 5] - f[:, 0]], axis=1)
+
+
+def build_kit_by_level(segments: list[Segment], sr: int, n_per_class: int | dict[str, int] = 24,
+                       classes: tuple[str, ...] = COARSE_CLASSES, min_confidence: float = MIN_CONFIDENCE) -> Kit:
+    """MIDI だけで鳴らすためのキット（製品のキット）: 種類ごとに、音量の順に `n_per_class` 個の区分に分け、各区分から
+    「普通の音」を 1 つずつ選ぶ。
+
+    MIDI で鳴らすときは、強さ（音量）だけで音を選ぶ（`render_midi`、プラグインの `SampleEngine`）。`build_kit_by_features`
+    （特徴の k-means の代表。方式 C 用）は音色のばらつきを覆うように選ぶので、他の音が混ざった打や余韻の切れた打も代表になり、
+    それが音量の近い普通の打に当たる。ここでは:
+
+    - 区分は、音量の順に同じ数ずつ（打の多い音量帯に音を多く割く）。
+    - 各区分で、音色（減衰・明るさ・帯域の配分）がその区分の中央に最も近い音を選ぶ。
+    - 余韻の途中で切れていない音（`tail_level_db` < `TAIL_CUT_DB`）が区分にあれば、その中から選ぶ。
+    - 分離の確からしさの低い打は、先に候補から外す（`confident_segments`）。
+
+    クラウドの標本での MIDI だけの距離（k-means の代表 → この選び方。正解の打点／取りこぼしあり）:
+    StemGMD 1.041／1.537 → 1.017／1.502、E-GMD 0.917／1.178 → 0.837／1.130（2026-11-17）。
+    副作用: 普通の音を選ぶので、明るい・長い打（開いたハイハットなど）の分のエネルギーが出ず、超高域（10 kHz 以上）が
+    0.3〜1 dB 下がる。音量だけで選ぶ限り残る（奏法を別のノートにするまで）。
+    """
+    parts: dict[str, list[Layer]] = {}
+    feat_norm: dict[str, tuple[list[float], list[float]]] = {}
+    for cls in classes:
+        segs = confident_segments([s for s in segments if s.cls == cls], min_confidence)
+        if not segs:
+            continue
+        feats = np.array([segment_features(s.audio, sr) for s in segs])
+        n_cls = n_per_class.get(cls, 24) if isinstance(n_per_class, dict) else n_per_class
+        if 0 < n_cls < len(segs):
+            timbre = _timbre(feats)
+            z = (timbre - np.median(timbre, axis=0)) / (timbre.std(axis=0) + 1e-3)
+            whole = np.array([tail_level_db(s.audio, sr) < TAIL_CUT_DB for s in segs])
+            chosen = []
+            for group in np.array_split(np.argsort(feats[:, 0], kind="stable"), n_cls):
+                cand = group[whole[group]] if np.any(whole[group]) else group
+                center = np.median(z[group], axis=0)
+                chosen.append(int(cand[int(np.argmin(((z[cand] - center) ** 2).sum(axis=1)))]))
+        else:  # n_cls <= 0 か、打が少なければ全部
+            chosen = list(range(len(segs)))
+        layer = Layer(1, 127)
+        for i in sorted(chosen, key=lambda i: feats[i, 0]):
+            layer.samples.append(segs[i].audio)
+            layer.source_times.append(segs[i].time)
+            layer.peaks_db.append(float(feats[i, 0]))
+            layer.features.append([float(v) for v in feats[i]])
+            layer.confidences.append(segs[i].confidence)
+        parts[cls] = [layer]
+        feat_norm[cls] = ([float(v) for v in feats.mean(axis=0)], [float(v) for v in feats.std(axis=0) + 1e-3])
+    return Kit(sr, parts, feat_norm)
+
+
 def hit_segments_from_parts(parts: dict[str, tuple[np.ndarray, int]], hits: list[Hit],
                             max_len_sec: float | dict[str, float] | None = None) -> list[np.ndarray | None]:
     """各打の「自分の区間」（打点から同じ種類の次の打まで、上限は種類ごと）をパート別ステムから取る。hits と同じ順。"""
@@ -474,8 +712,12 @@ def build_kit(
     return Kit(sr, parts)
 
 
-def _onset_lag(target: np.ndarray, sample: np.ndarray, sr: int, max_lag_sec: float = 0.015) -> int:
-    """`sample` を何サンプルずらせば立ち上がりが `target` に重なるか（相互相関、±max_lag_sec）。正なら遅らせる。"""
+def _onset_lag(target: np.ndarray, sample: np.ndarray, sr: int, max_lag_sec: float = 0.015, margin: float = 1.0) -> int:
+    """`sample` を何サンプルずらせば立ち上がりが `target` に重なるか（相互相関、±max_lag_sec）。正なら遅らせる。
+
+    比べるのは、頭から 40 ms の波形の絶対値。`margin` が 1 より大きければ、最良の位置の相関が「ずらさない位置」の相関の `margin` 倍
+    以上のときだけずらす（それ未満なら 0）。低い音の太鼓は、周期ぶん滑った位置でも相関がほぼ同じになることがある。
+    """
     n = min(int(0.04 * sr), target.size, sample.size)
     if n < 16:
         return 0
@@ -494,6 +736,10 @@ def _onset_lag(target: np.ndarray, sample: np.ndarray, sr: int, max_lag_sec: flo
             c = float(np.dot(a[: n + lag], b[-lag:]))
         if c > best:
             best, best_lag = c, lag
+    if margin > 1.0 and best_lag != 0:
+        c0 = float(np.dot(a, b))
+        if c0 > 0 and best < margin * c0:
+            return 0
     return best_lag
 
 

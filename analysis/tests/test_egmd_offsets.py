@@ -106,3 +106,15 @@ def test_stems_mode_writes_label_offset_and_run_eval_uses_it(tmp_path, capsys):
     import re
 
     assert re.search(r"正解（時刻を -(59|60|61) ms 直した）", (tmp_path / "r.md").read_text(encoding="utf-8"))
+
+
+def test_a_hit_at_the_very_start_survives_a_tiny_negative_offset():
+    """曲の頭ちょうどの打は、ずれの測定の誤差（−0.1 ms）で正解から落ちない。区間より十分前の打は落ちる。"""
+    from drumeval.stems import truth_hits_in_window
+
+    hits = [Hit(0.0, "kick", 100), Hit(0.5, "snare", 90), Hit(0.995, "hihat", 80), Hit(1.2, "kick", 100)]
+    got = truth_hits_in_window(hits, start=0.0, duration=1.0, offset=-0.0001)
+    assert [(round(h.time, 4), h.cls) for h in got] == [(0.0, "kick"), (0.4999, "snare"), (0.9949, "hihat")]
+    # 区間を途中から始めるとき: 頭の 3 ms 前の打は頭の打として残し（時刻 0）、20 ms 前の打は落とす
+    got = truth_hits_in_window([Hit(0.480, "kick", 100), Hit(0.497, "snare", 90), Hit(0.6, "kick", 100)], start=0.5, duration=1.0)
+    assert [(round(h.time, 3), h.cls) for h in got] == [(0.0, "snare"), (0.1, "kick")]

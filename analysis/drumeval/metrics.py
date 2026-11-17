@@ -118,6 +118,27 @@ def multi_resolution_stft_distance(
     }
 
 
+def part_stft_distance(ref: np.ndarray, est: np.ndarray, floor_db: float = -40.0) -> float:
+    """パート 1 つ（キックだけ、など）の音どうしの多重解像度 STFT 距離。小さいほど近い。
+
+    `est` の RMS を `ref` に合わせ、両方に同じ小さな雑音（`ref` の RMS の `floor_db`）を足してから測る。パートだけの音は打の間が
+    ほぼ無音で、そのまま測ると、対数の差が「どちらも聞こえない所」のわずかな違いで決まってしまう。同じ雑音を足すと、その差は消えて、
+    打の鳴っている所の差が残る。混ざった音の距離では埋もれる、キックやスネアだけの違いを見るのに使う。
+    """
+    ref = np.asarray(ref, dtype=np.float64).ravel()
+    est = np.asarray(est, dtype=np.float64).ravel()
+    n = min(ref.size, est.size)
+    if n == 0:
+        raise ValueError("空の信号")
+    ref, est = ref[:n], est[:n]
+    rms_ref = float(np.sqrt(np.mean(ref**2)))
+    rms_est = float(np.sqrt(np.mean(est**2)))
+    if rms_est > 1e-12:
+        est = est * (rms_ref / rms_est)
+    noise = np.random.default_rng(0).standard_normal(n) * rms_ref * 10.0 ** (floor_db / 20.0)
+    return multi_resolution_stft_distance(ref + noise, est + noise)["total"]
+
+
 # ---------------------------------------------------------------------------
 # 帯域ごとのエネルギー差（「こもる」「痩せる」を数字にする）
 # ---------------------------------------------------------------------------

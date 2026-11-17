@@ -285,3 +285,156 @@ def test_low_confidence_segments_do_not_become_kit_samples(tmp_path):
     assert [s.confidence for s in unknown] == [0.1, 0.2, 0.3, 0.4, 0.5]
     save_kit(kit, tmp_path / "kit")
     assert load_kit(tmp_path / "kit").parts["hihat"][0].confidences == kit.parts["hihat"][0].confidences
+
+
+# ---------------------------------------------------------------------------
+# 打点の合わせ直し（2026-11-17: 区分 A の a07 で「MIDI だけだとキックが悪い」。1 打ごとに立ち上がりを探す方法が、キックの 1 割を
+# 5 ms 以上ずらしていた。種類ごとのひな形に合わせる方法に替えた）
+# ---------------------------------------------------------------------------
+
+def _kick_part(sr: int, true: list[float], gains: list[float], seed: int = 1) -> np.ndarray:
+    """ゆっくり立ち上がる低い音（キックの胴）。分離の窓による前ぶれ（20 ms かけて上がる小さい雑音）と、
+    3 つに 1 つは 10 ms 前に小さい音（他の太鼓の漏れ）が付く。"""
+    rng = np.random.default_rng(seed)
+    x = np.zeros(int((max(true) + 1.0) * sr))
+    n = int(0.5 * sr)
+    t = np.arange(n) / sr
+    body = np.sin(2 * np.pi * 55 * t) * (1 - np.exp(-t / 0.004)) * np.exp(-t / 0.12)
+    pre_n = int(0.02 * sr)
+    click = rng.standard_normal(int(0.002 * sr)) * 0.08
+    for k, (tt, g) in enumerate(zip(true, gains)):
+        a = int(round(tt * sr))
+        x[a : a + n] += body * g
+        x[a - pre_n : a] += rng.standard_normal(pre_n) * np.linspace(0, 1, pre_n) ** 2 * 0.03 * g
+        if k % 3 == 1:
+            b = a - int(0.010 * sr)
+            x[b : b + click.size] += click
+    return x
+
+
+def test_refine_onsets_puts_every_hit_at_the_same_point_of_its_attack():
+    """同じ種類の打は、立ち上がりの同じ位置に時刻がそろう（どの音をどの打に置いても位置が合う）。
+    前の打の余韻の途中の打も、手前に小さい音がある打も、採譜の時刻が ±8 ms ずれていても。"""
+    from drumeval.extract import refine_onsets
+
+    sr = 44100
+    true = [0.50, 1.00, 1.22, 1.90, 2.35, 2.55, 3.20, 3.80, 4.05, 4.70, 5.30, 5.52]
+    gains = [1.0, 0.6, 0.9, 1.0, 0.5, 0.8, 1.0, 0.7, 0.9, 1.0, 0.6, 0.8]
+    x = _kick_part(sr, true, gains)
+    jitter = np.random.default_rng(2).uniform(-0.008, 0.008, len(true))
+    hits = [Hit(t + j, "kick", None) for t, j in zip(true, jitter)]
+    stats: dict = {}
+    out = refine_onsets({"kick": (x, sr)}, hits, stats=stats)
+    err = np.array([h.time - t for h, t in zip(out, true)]) * 1000
+    assert err.max() - err.min() < 1.0, err  # 打ごとのばらつきは 1 ms 未満
+    assert len(stats["corr"]) == len(hits) and all(0.9 < c <= 1.0 + 1e-9 for c in stats["corr"]), stats  # 同じ形の打は、ひな形との相関が 1 に近い
+    assert -0.5 < np.median(err) < 2.0, err  # 立ち上がりの頭の近く（頭より少し後ろ。切り出しは、その 2 ms 前から）
+    # 正解の時刻そのものを渡しても、ばらつきを増やさない
+    out0 = refine_onsets({"kick": (x, sr)}, [Hit(t, "kick", None) for t in true])
+    err0 = np.array([h.time - t for h, t in zip(out0, true)]) * 1000
+    assert err0.max() - err0.min() < 1.0, err0
+
+
+def test_refine_onsets_does_not_pull_grace_notes_onto_the_next_hit():
+    """装飾音（30 ms 後に大きい打が続く小さい打）を、次の打の立ち上がりへ動かさない。順序も変えない。"""
+    from drumeval.extract import refine_onsets
+
+    sr = 44100
+    rng = np.random.default_rng(3)
+    true = [0.5, 0.53, 1.0, 1.4, 1.43, 2.0, 2.5, 3.0]
+    x = np.zeros(int(4 * sr))
+    m = int(0.2 * sr)
+    burst = rng.standard_normal(m) * np.exp(-np.arange(m) / (0.03 * sr))
+    for t in true:
+        a = int(round(t * sr))
+        x[a : a + m] += burst * (0.4 if t in (0.5, 1.4) else 1.0)
+    hits = [Hit(t + j, "snare", None) for t, j in zip(true, rng.uniform(-0.006, 0.006, len(true)))]
+    out = refine_onsets({"snare": (x, sr)}, hits)
+    err = (np.array([h.time for h in out]) - np.array(true)) * 1000
+    assert np.max(np.abs(err)) < 2.0, err
+    assert [h.time for h in out] == sorted(h.time for h in out)
+
+
+def test_refine_onsets_with_few_hits_or_nothing_to_align():
+    from drumeval.extract import refine_onsets
+
+    sr = 22050
+    x = np.zeros(2 * sr)
+    n = int(0.1 * sr)
+    for t in (0.5, 1.2):  # 2 打だけ（ひな形を作れない）→ 1 打ごとに立ち上がりを探す
+        x[int(t * sr) : int(t * sr) + n] += np.random.default_rng(0).standard_normal(n) * np.exp(-np.arange(n) / (0.02 * sr))
+    out = refine_onsets({"tom": (x, sr)}, [Hit(0.507, "tom", 90), Hit(1.194, "tom", None)])
+    assert abs(out[0].time - 0.5) < 0.0015 and abs(out[1].time - 1.2) < 0.0015 and out[0].velocity == 90
+    silent = [Hit(0.1 * k, "kick", None) for k in range(1, 9)]
+    assert refine_onsets({"kick": (np.zeros(sr), sr)}, silent) == silent  # 無音のパートでは動かさない
+    assert refine_onsets({}, silent) == silent and refine_onsets({"kick": (x, sr)}, []) == []
+
+
+def test_level_kit_takes_one_ordinary_sample_per_level_band(tmp_path):
+    """MIDI 用のキット: 音量の順に区分し、各区分から「普通の音」を選ぶ。音色の外れた音や、余韻の切れた音は選ばない。"""
+    from drumeval.extract import Segment, build_kit_by_level, load_kit, save_kit, tail_level_db
+
+    sr = 22050
+    rng = np.random.default_rng(0)
+    n = int(0.3 * sr)
+    t = np.arange(n) / sr
+
+    def hit(level_db: float, kind: str = "normal") -> np.ndarray:
+        body = np.sin(2 * np.pi * 180 * t) * np.exp(-t / 0.04) + 0.3 * rng.standard_normal(n) * np.exp(-t / 0.02)
+        if kind == "odd":  # 他の音が混ざった打（明るく、長い）
+            body = 0.3 * body + rng.standard_normal(n) * np.exp(-t / 0.15)
+        if kind == "cut":  # 次の打が近く、余韻の途中で切れた打
+            body = body[: int(0.03 * sr)].copy()
+        a = body / np.max(np.abs(body)) * 10 ** (level_db / 20)
+        a[-int(0.01 * sr):] *= np.linspace(1.0, 0.0, int(0.01 * sr))  # 切り出しと同じフェード
+        return a
+
+    segs = []
+    levels = np.linspace(-30.0, -3.0, 48)
+    for i, lv in enumerate(levels):
+        kind = "odd" if i % 6 == 2 else "cut" if i % 6 == 4 else "normal"
+        segs.append(Segment("snare", 0.5 * i, hit(float(lv), kind), float(lv)))
+    odd_times = {s.time for i, s in enumerate(segs) if i % 6 == 2}
+    cut_times = {s.time for i, s in enumerate(segs) if i % 6 == 4}
+    assert tail_level_db(segs[4].audio, sr) > -35.0 > tail_level_db(segs[0].audio, sr)
+
+    kit = build_kit_by_level(segs, sr, n_per_class=8)
+    layer = kit.parts["snare"][0]
+    assert len(layer.samples) == 8
+    assert not (set(layer.source_times) & odd_times) and not (set(layer.source_times) & cut_times)
+    # 音量の範囲を端から端まで覆う（8 区分。各区分は 6 打 = 約 3.4 dB の幅）
+    assert layer.peaks_db == sorted(layer.peaks_db) and layer.peaks_db[0] < -26.0 and layer.peaks_db[-1] > -7.0
+    assert np.max(np.diff(layer.peaks_db)) < 7.0
+    # 打が少なければ全部。0 なら全部
+    assert build_kit_by_level(segs[:5], sr, n_per_class=8).n_samples("snare") == 5
+    assert build_kit_by_level(segs, sr, n_per_class=0).n_samples("snare") == 48
+    # 分離の確からしさの低い打は候補にしない
+    for i, s_ in enumerate(segs):
+        s_.confidence = 0.3 if i < 24 else 0.95
+    kit2 = build_kit_by_level(segs, sr, n_per_class=8)
+    assert min(kit2.parts["snare"][0].source_times) >= 0.5 * 24 and all(c == 0.95 for c in kit2.parts["snare"][0].confidences)
+    save_kit(kit2, tmp_path / "kit")
+    assert load_kit(tmp_path / "kit").parts["snare"][0].source_times == kit2.parts["snare"][0].source_times
+
+
+def test_onset_lag_margin_keeps_the_midi_position_unless_another_is_clearly_better():
+    """位置のずれの診断: 少しだけ相関の高い別の位置（低い音の周期ぶん滑った位置など）には動かさない。本当にずれた音は動かす。"""
+    from drumeval.extract import _onset_lag
+
+    sr = 44100
+    n = int(0.05 * sr)
+    t = np.arange(n) / sr
+
+    def pulse(at_sec: float, gain: float = 1.0) -> np.ndarray:
+        y = np.zeros(n)
+        k = int(round(at_sec * sr))
+        y[k:] = gain * np.exp(-t[: n - k] / 0.003)
+        return y
+
+    sample = pulse(0.002)
+    echoed = pulse(0.002) + pulse(0.008, 1.1)  # 6 ms 後に、少しだけ大きい同じ形（相関は 6 ms ずらした位置がわずかに高い）
+    assert abs(_onset_lag(echoed, sample, sr) / sr * 1000 - 6.0) < 0.5
+    assert _onset_lag(echoed, sample, sr, margin=1.25) == 0
+    late = pulse(0.010)  # 本当に 8 ms 遅い
+    assert abs(_onset_lag(late, sample, sr, margin=1.25) / sr * 1000 - 8.0) < 0.5
+    assert _onset_lag(sample, sample, sr, margin=1.25) == 0

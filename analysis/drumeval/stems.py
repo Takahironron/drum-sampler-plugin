@@ -113,6 +113,24 @@ def read_label_offset(song_dir: Path) -> float:
     return 0.0
 
 
+START_TOLERANCE_SEC = 0.005  # 区間の頭よりこれだけ手前までの打は、頭の打として残す
+
+
+def truth_hits_in_window(hits: list[Hit], start: float, duration: float, offset: float = 0.0) -> list[Hit]:
+    """正解の打点を、評価の区間（ファイルの `start` 秒から `duration` 秒）の相対時刻に直す。`offset`（`label_offset.txt`）を足す。
+
+    区間の頭のごく手前（`START_TOLERANCE_SEC` まで）の打は、時刻を 0 にして残す。ずれの測定には 1 ms ほどの誤差があり、
+    そのままだと曲の頭ちょうどの打（時刻 0.000）が −0.1 ms になって正解から落ちる（その打の音は区間に入っているのに、
+    切り出しにも採点にも使われなくなる）。
+    """
+    out: list[Hit] = []
+    for h in hits:
+        t = h.time + offset - start
+        if -START_TOLERANCE_SEC <= t < duration:
+            out.append(Hit(max(t, 0.0), h.cls, h.velocity))
+    return out
+
+
 def _load_mono_at(path: Path, sr: int) -> np.ndarray:
     return load_audio(path, sr)
 
@@ -171,14 +189,11 @@ def read_stem_songs(stems_dir: str | Path, ids: list[str] | None = None, max_sec
         truth = next((p for p in (d / "hits.csv", d / "hits.mid", d / "hits.midi") if p.exists()), None)
         pseudo = d / "hits_pseudo.csv"
         if truth is not None:
-            off = read_label_offset(d)  # 正解の時刻のずれ（あれば直す）
-            hits = [Hit(h.time + off, h.cls, h.velocity) for h in load_hits(truth)]
             start = read_start_override(d) or 0.0
             dur = sf.info(str(audio)).duration - start
-            hits = [Hit(h.time - start, h.cls, h.velocity) for h in hits if h.time >= start]
             if max_seconds and dur > max_seconds:
                 dur = max_seconds
-            hits = [h for h in hits if h.time < dur]
+            hits = truth_hits_in_window(load_hits(truth), start, dur, read_label_offset(d))  # 正解の時刻のずれがあれば直す
             songs.append(StemSong(d.name, audio, hits, start, dur, CLASSES5, "hits"))
         elif pseudo.exists():
             meta = read_hits_csv_meta(pseudo)
