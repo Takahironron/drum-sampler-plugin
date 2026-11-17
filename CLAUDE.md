@@ -46,7 +46,7 @@
 ### 開発の順序と品質
 
 - 解析は Python（PyTorch、librosa など）で試作し、精度を確かめてから C++／ONNX に移す。音源側は最初から JUCE で書く。
-- pluginval で VST3 を自動検査、GitHub Actions で Windows と macOS のビルド、解析の精度は固定の評価用ステム集で毎回測る（回帰テスト）。
+- pluginval で VST3 を自動検査、GitHub Actions で Windows と macOS のビルド、解析の精度は固定の評価用ステム集で毎回測る（回帰テスト）。回帰テストは CI の analysis-regression（StemGMD 12 曲と E-GMD 14 本。基準は `analysis/regression_baseline.json`、比べるのは `analysis/check_regression.py`）。解析を直して数字が良くなったら、`--update` で基準を更新してコミットする。
 - Takahiro の評価用ステム（区分 A、CD 曲）はクラウドに無い。パート分け・切り出し・再現を変えるときは、先にクラウドで E-GMD と StemGMD の標本（下の表）で前後を測り、それから Takahiro に区分 A での実行と聞き比べを頼む。
 - **プラグインで鳴る音は、MIDI（時刻・種類・強さ）だけでキットを鳴らした音。** 物差しは `run_eval.py` の「MIDI だけで鳴らす」（`rerender_midi.wav`。キットは `extract.build_kit_by_level`）。方式 C（`rerender_parts.wav`）は MIDI に無い情報を使う（打ごとの音色と、位置の合わせ直し。距離は代表音の選びの乱数で、12 曲平均が ±0.03 揺れる）。キックやスネアだけの違いは、混ざった音の距離ではなく表の「種類ごとの距離」で見る。鳴らし方の決まり（キットと MIDI の約束）は `analysis/README.md`。Python の `render_midi` と C++ の `SampleEngine` は 1 サンプル単位で一致させてあり（CI の engine-parity）、変えるときは両方を変える。採譜の入口（間引き・対数メル・打点を拾う）も Python（`drumeval/features.py`、`infer.py`）と C++（`plugin/Source/Analysis/`）で一致させてある（CI の transcribe-parity）。
 - **E-GMD の配布物は、正解の MIDI と音がファイルごとにずれているものがある**（test 分割の全部 5,271 本で、31% が 10 ms 以上、9% が 50 ms 以上）。学習と採点の前に `analysis/egmd_offsets.py` で測って直す（`label_offsets.csv`、評価用フォルダは `label_offset.txt`）。v5 までのモデルは直さないラベルで学習した。v5 の M0-1（E-GMD test の 60 本）は、直さない正解で 0.773、直した正解で 0.819（2026-11-17）。これより前の記録の E-GMD の数字は、直さない正解のもの。`train_transcriber.py` は、使うトラックにずれを測っていないものがあると学習を始めない。
@@ -119,6 +119,7 @@
 | 採点スクリプト（F 値、STFT 距離） | `analysis/`（`analysis/README.md`） |
 | クラウドでも使える実データの評価セット（CC BY 4.0。`data/` に取ってくる。コミットしない） | `analysis/fetch_egmd_sample.py`（E-GMD の 14 本。正解 MIDI、タム・シンバル・電子系のキット）、`analysis/fetch_stemgmd_sample.py`（StemGMD の 12 曲。パート別の単独録音 = 分離の本当の正解）。取った後 `python analysis/run_eval.py data/stemgmd_stems --parts nmfd-oracle`。E-GMD の標本は、正解と音の時刻のずれを `label_offset.txt` に書いてある（`run_eval.py` が直して使う） |
 | 解析の参照実装（ステム 1 本 → キットと MIDI）と、キットと MIDI の約束 | `analysis/analyze_stem.py`、`analysis/drumeval/analyzer.py`、`analysis/README.md` |
+| 解析の回帰テスト（基準と比べる） | `analysis/check_regression.py`、`analysis/regression_baseline.json`（CI: `analysis-regression.yml`） |
 | Python と C++ のエンジンの一致の検査 | `analysis/engine_parity.py`（CI: `build.yml` の Linux、`engine-parity.yml`） |
 | Python と C++ の採譜の一致の検査 | `analysis/transcribe_parity.py`、`plugin/Tools/TranscribeTest.cpp`（CI: `transcribe-parity.yml`、Windows と Linux） |
 | JUCE のプラグイン（kit.json を読んで MIDI で鳴らす。解析の入口の C++ 版は `plugin/Source/Analysis/`） | `plugin/`（`plugin/README.md`） |
