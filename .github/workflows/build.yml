@@ -5,9 +5,9 @@ name: build
 on:
   push:
     branches: ["main", "claude/**"]
-    paths: ["plugin/**", ".github/workflows/build.yml"]
+    paths: ["plugin/**", "!plugin/**/*.md", ".github/workflows/build.yml"] # 文書だけの変更ではビルドしない
   pull_request:
-    paths: ["plugin/**", ".github/workflows/build.yml"]
+    paths: ["plugin/**", "!plugin/**/*.md", ".github/workflows/build.yml"]
   workflow_dispatch:
 
 env:
